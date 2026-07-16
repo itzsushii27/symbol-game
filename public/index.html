@@ -410,10 +410,10 @@
       <button id="cancelBtn" class="ghost" style="display:none;">Cancel</button>
     </div>
 
-    <div class="difficulty-section" id="botDifficultyWrapper" style="display: none;">
+    <div class="difficulty-section" id="botDifficultyWrapper">
       <div class="seq-label" style="display: flex; justify-content: space-between;">
         <span>Bot Difficulty</span>
-        <span id="botDiffVal">Level 3</span>
+        <span id="botDiffVal">Level 3 (Depth 5)</span>
       </div>
       <input type="range" id="botDiffSlider" class="difficulty-slider" min="0" max="7" value="3" />
     </div>
@@ -495,6 +495,8 @@
   let clockActiveId = null; // whose clock is currently ticking down locally
   let clockTickHandle = null;
 
+  const depths = [0, 1, 3, 5, 7, 9, 11, 13];
+
   // Sync TC button selection
   timeControlRow.querySelectorAll('.tc-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -511,17 +513,13 @@
       selectedMode = btn.dataset.mode;
       modeRow.querySelectorAll('.tc-btn').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
-      
-      if (selectedMode === 'casual') {
-        botDifficultyWrapper.style.display = 'block';
-      } else {
-        botDifficultyWrapper.style.display = 'none';
-      }
     });
   });
 
   botDiffSlider.addEventListener('input', (e) => {
-    botDiffVal.textContent = `Level ${e.target.value}`;
+    const val = parseInt(e.target.value);
+    const d = depths[val];
+    botDiffVal.textContent = `Level ${val} (Depth ${d})`;
   });
 
   function updateMyRatingLabel() {
@@ -629,7 +627,7 @@
     socket.emit('findBotMatch', { timeControl: selectedTc, skillLevel });
     findMatchBtn.disabled = true;
     playBotBtn.disabled = true;
-    statusEl.textContent = 'Starting training matches with bot...';
+    statusEl.textContent = 'Starting training match with bot...';
   });
 
   cancelBtn.addEventListener('click', () => {
