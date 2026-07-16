@@ -171,3 +171,109 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
     acc2.ratings[tc] = newR2;
 
     io.to(roomId).emit('gameOver', {
+      outcome,
+      winnerId,
+      timeControl: tc,
+      ratings: { [socketId1]: newR1.rating, [socketId2]: newR2.rating }
+    });
+  } else {
+    io.to(roomId).emit('gameOver', { outcome, winnerId, timeControl: tc, ratings: {} });
+  }
+
+  const conn1 = connections.get(socketId1);
+  const conn2 = connections.get(socketId2);
+  if (conn1) conn1.roomId = null;
+  if (conn2) conn2.roomId = null;
+}
+
+io.on('connection', (socket) => {
+  const user = socket.request.user;
+
+  if (!user) {
+    socket.emit('authRequired');
+    return;
+  }
+
+  connections.set(socket.id, { accountId: user.id, roomId: null });
+
+  socket.on('findMatch', (timeControl) => {
+    if (!TIME_CONTROL_CONFIG[timeControl]) return;
+
+    const conn = connections.get(socket.id);
+    if (!conn || conn.roomId) return;
+
+    const account = accountForSocket(socket.id);
+    if (!account) return;
+
+    const myRating = account.ratings[timeControl].rating;
+    const queue = queues[timeControl];
+
+    const opponentIdx = findClosestOpponent(queue, myRating);
+
+    if (opponentIdx !== -1) {
+      const opponentEntry = queue.splice(opponentIdx, 1)[0];
+      const opponentId = opponentEntry.socketId;
+      const opponentSocket = io.sockets.sockets.get(opponentId);
+      const opponentConn = connections.get(opponentId);
+
+      if (!opponentSocket || !opponentConn) {
+        // stale entry, just queue this player instead
+        queue.push({ socketId: socket.id, rating: myRating, queuedAt: Date.now() });
+        socket.emit('queued');
+        return;
+      }
+
+      const roomId = makeRoomId();
+      // Random P1/P2 assignment — order[0] is always P1, order[1] is always P2.
+      const order = Math.random() < 0.5 ? [socket.id, opponentId] : [opponentId, socket.id];
+
+      const config = TIME_CONTROL_CONFIG[timeControl];
+      const clocks = {
+        [order[0]]: config.baseMs,
+        [order[1]]: config.baseMs
+      };
+
+      rooms.set(roomId, {
+        sequence: [],
+        turn: 0,
+        players: order,
+        outcome: null,
+        timeControl,
+        clocks,
+        turnStartedAt: Date.now(),
+        flagTimeout: null
+      });
+
+      conn.roomId = roomId;
+      opponentConn.roomId = roomId;
+
+      socket.join(roomId);
+      opponentSocket.join(roomId);
+
+      io.to(roomId).emit('matchFound', {
+        roomId,
+        timeControl,
+        timeControlLabel: config.label,
+        baseMs: config.baseMs,
+        incrementMs: config.incrementMs,
+        players: order.map((id) => {
+          const acc = accountForSocket(id);
+          return {
+            id,
+            name: acc ? acc.name : 'Player',
+            rating: acc ? acc.ratings[timeControl].rating : 1500
+          };
+        }),
+        clocks
+      });
+
+      scheduleFlagCheck(roomId);
+    } else {
+      queue.push({ socketId: socket.id, rating: myRating, queuedAt: Date.now() });
+      socket.emit('queued');
+    }
+  });
+
+  socket.on('cancelFind', (timeControl) => {
+    if (!TIME_CONTROL_CONFIG[timeControl]) return;
+    const queue = queues[timeControl];
