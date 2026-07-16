@@ -599,7 +599,9 @@
   function connectSocket() {
     socket = io();
 
-    socket.on('connect', () => { myId = socket.id; });
+    socket.on('connect', () => { 
+      myId = socket.id; 
+    });
 
     socket.on('authRequired', () => {
       lobbyPanel.style.display = 'none';
@@ -644,6 +646,11 @@
     });
 
     socket.on('matchFound', (data) => {
+      // Robustly capture client id from socket if connection had latency
+      if (socket && socket.id) {
+        myId = socket.id;
+      }
+
       roomId = data.roomId;
       roomPlayers = data.players;
       clocks = { ...data.clocks };
@@ -659,7 +666,9 @@
       renderPlayers();
       renderClocks();
       renderSequence([]);
-      updateTurn(roomPlayers[0].id); // players[0] moves first
+      
+      // Explicit turn identification based strictly on server's assigned turn
+      updateTurn(data.nextTurnPlayerId || roomPlayers[0].id);
     });
 
     socket.on('moveMade', (data) => {
@@ -698,7 +707,6 @@
         }
       }
 
-      // Explicitly enforce bot matches are unrated in the UI presentation
       if (isBotMatchActive || data.isBotMatch) {
         text += ' (Practice match - unrated).';
       } else {
@@ -741,8 +749,11 @@
     playersRow.innerHTML = '';
     roomPlayers.forEach((p, i) => {
       const tag = document.createElement('div');
-      tag.className = 'player-tag' + (p.id === myId ? ' me' : '');
-      // Bot matches get labeled CPU with no ratings visible
+      
+      // Dynamically confirm identity - fallback check in case of ID differences
+      const isMe = p.id === myId || (socket && p.id === socket.id);
+      tag.className = 'player-tag' + (isMe ? ' me' : '');
+      
       const isPlayerBot = p.id === 'bot' || p.id.toString().startsWith('bot');
       tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} ${isPlayerBot ? '(CPU)' : '(' + p.rating + ')'}`;
       playersRow.appendChild(tag);
@@ -783,7 +794,6 @@
     clockActiveId = activeId;
     let lastTick = Date.now();
 
-    // Do not tick down clocks locally if the active turn ID is the bot CPU
     if (activeId && activeId.toString().startsWith('bot')) {
       return;
     }
@@ -795,8 +805,8 @@
       if (clocks[clockActiveId] !== undefined) {
         clocks[clockActiveId] = Math.max(0, clocks[clockActiveId] - elapsed);
         
-        // If your player clock hits 0 locally, emit a timeout event to notify the server immediately
-        if (clocks[clockActiveId] <= 0 && clockActiveId === myId) {
+        const isMe = clockActiveId === myId || (socket && clockActiveId === socket.id);
+        if (clocks[clockActiveId] <= 0 && isMe) {
           stopClockTick();
           if (socket && roomId) {
             socket.emit('playerTimeout', { roomId });
@@ -818,7 +828,9 @@
   }
 
   function updateTurn(nextPlayerId) {
-    myTurn = nextPlayerId === myId;
+    // Robust local matching check
+    myTurn = (nextPlayerId === myId) || (socket && nextPlayerId === socket.id);
+    
     turnIndicator.classList.toggle('your-turn', myTurn);
     turnIndicator.textContent = myTurn ? 'Your move — pick X, Y, or Z.' : "Opponent's move...";
     document.querySelectorAll('#controls button').forEach(b => b.disabled = !myTurn);
