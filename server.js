@@ -1,3 +1,4 @@
+console.log("DIAGNOSTIC - GOOGLE_CLIENT_ID is:", process.env.GOOGLE_CLIENT_ID ? "FOUND" : "NOT FOUND (UNDEFINED)");
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
