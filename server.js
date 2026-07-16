@@ -178,8 +178,8 @@ function handleFlag(roomId, flaggedSocketId) {
 
 function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
   const [socketId1, socketId2] = room.players;
-  const acc1 = accountForSocket(socketId1);
-  const acc2 = room.isBotMatch ? null : accountForSocket(socketId2);
+  const acc1 = socketId1 === 'bot' ? null : accountForSocket(socketId1);
+  const acc2 = socketId2 === 'bot' ? null : accountForSocket(socketId2);
   const tc = room.timeControl;
 
   let winnerId = null;
@@ -191,7 +191,9 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
     winnerId = socketId2;
   }
 
-  if (acc1 && acc2 && !room.isBotMatch) {
+  const isBotMatch = room.isBotMatch || socketId1 === 'bot' || socketId2 === 'bot';
+
+  if (acc1 && acc2 && !isBotMatch) {
     let score1 = outcome === 'draw' ? 0.5 : (winnerId === socketId1 ? 1 : 0);
     const score2 = 1 - score1;
 
@@ -217,17 +219,59 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
       winnerId, 
       timeControl: tc, 
       ratings: {}, 
-      isBotMatch: room.isBotMatch 
+      isBotMatch: true 
     });
   }
 
-  const conn1 = connections.get(socketId1);
-  if (conn1) conn1.roomId = null;
-
-  if (!room.isBotMatch) {
+  // Cleanup player connection states
+  if (socketId1 !== 'bot') {
+    const conn1 = connections.get(socketId1);
+    if (conn1) conn1.roomId = null;
+  }
+  if (socketId2 !== 'bot') {
     const conn2 = connections.get(socketId2);
     if (conn2) conn2.roomId = null;
   }
+
+  // Clear timers & remove room from memory to prevent memory leaks
+  clearRoomTimer(room);
+  rooms.delete(roomId);
+}
+
+function triggerBotMove(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || room.outcome) return;
+
+  setTimeout(() => {
+    // Double check room validity after the delay
+    const activeRoom = rooms.get(roomId);
+    if (!activeRoom || activeRoom.outcome) return;
+
+    const botMoveSym = getBotMove(activeRoom.sequence, activeRoom.botSkill, false);
+    const botRes = applyMove(activeRoom.sequence, botMoveSym);
+    
+    activeRoom.sequence = botRes.sequence;
+    activeRoom.turn += 1;
+    activeRoom.turnStartedAt = Date.now();
+
+    io.to(roomId).emit('moveMade', {
+      symbol: botMoveSym,
+      sequence: activeRoom.sequence,
+      nextTurnPlayerId: activeRoom.players[activeRoom.turn % 2],
+      clocks: activeRoom.clocks
+    });
+
+    if (botRes.outcome) {
+      activeRoom.outcome = botRes.outcome;
+      settleGame(activeRoom, roomId, botRes.outcome);
+    } else {
+      // If next turn is also bot (unlikely but safe check)
+      const nextPlayer = activeRoom.players[activeRoom.turn % 2];
+      if (nextPlayer === 'bot') {
+        triggerBotMove(roomId);
+      }
+    }
+  }, 500); // 500ms humanized delay
 }
 
 io.on('connection', (socket) => {
@@ -250,8 +294,9 @@ io.on('connection', (socket) => {
     if (!account) return;
 
     const roomId = makeRoomId();
-    // Human is always P1 (order[0]), Bot is always P2 (order[1])
-    const order = [socket.id, 'bot'];
+    
+    // Randomize whether human is Player 1 (first) or Player 2 (second)
+    const order = Math.random() < 0.5 ? [socket.id, 'bot'] : ['bot', socket.id];
     const config = TIME_CONTROL_CONFIG[timeControl];
     
     rooms.set(roomId, {
@@ -277,12 +322,25 @@ io.on('connection', (socket) => {
       baseMs: config.baseMs,
       incrementMs: config.incrementMs,
       players: [
-        { id: socket.id, name: account.nickname || account.name, rating: Math.round(account.ratings[timeControl].rating) },
-        { id: 'bot', name: `Bot Level ${skillLevel}`, rating: 'CPU' }
+        { 
+          id: order[0], 
+          name: order[0] === 'bot' ? `Bot Level ${skillLevel}` : (account.nickname || account.name), 
+          rating: order[0] === 'bot' ? 'CPU' : Math.round(account.ratings[timeControl].rating) 
+        },
+        { 
+          id: order[1], 
+          name: order[1] === 'bot' ? `Bot Level ${skillLevel}` : (account.nickname || account.name), 
+          rating: order[1] === 'bot' ? 'CPU' : Math.round(account.ratings[timeControl].rating) 
+        }
       ],
       clocks: { [socket.id]: config.baseMs, 'bot': config.baseMs },
       isBotMatch: true
     });
+
+    // If bot is Player 1 (index 0), make it move first immediately
+    if (order[0] === 'bot') {
+      triggerBotMove(roomId);
+    }
   });
 
   socket.on('findMatch', (timeControl) => {
@@ -375,7 +433,7 @@ io.on('connection', (socket) => {
     if (!isValidSymbol(symbol)) return;
 
     const currentPlayerId = room.players[room.turn % 2];
-    if (currentPlayerId !== socket.id) return; 
+    if (currentPlayerId !== socket.id) return; // Not the user's turn
 
     if (!room.isBotMatch) {
       clearRoomTimer(room);
@@ -409,26 +467,10 @@ io.on('connection', (socket) => {
     }
 
     if (room.isBotMatch) {
-      // It is now the bot's turn
-      setTimeout(() => {
-        const botMoveSym = getBotMove(room.sequence, room.botSkill, false);
-        const botRes = applyMove(room.sequence, botMoveSym);
-        room.sequence = botRes.sequence;
-        room.turn += 1;
-        room.turnStartedAt = Date.now();
-
-        io.to(roomId).emit('moveMade', {
-          symbol: botMoveSym,
-          sequence: room.sequence,
-          nextTurnPlayerId: room.players[room.turn % 2],
-          clocks: room.clocks
-        });
-
-        if (botRes.outcome) {
-          room.outcome = botRes.outcome;
-          settleGame(room, roomId, botRes.outcome);
-        }
-      }, 500); // add half second delay so the bot feels human
+      const nextPlayer = room.players[room.turn % 2];
+      if (nextPlayer === 'bot') {
+        triggerBotMove(roomId);
+      }
     } else {
       scheduleFlagCheck(roomId);
     }
@@ -445,19 +487,17 @@ io.on('connection', (socket) => {
     if (conn && conn.roomId) {
       const room = rooms.get(conn.roomId);
       if (room && !room.outcome) {
-        if (!room.isBotMatch) {
-          clearRoomTimer(room);
-          room.outcome = 'forfeit';
-
-          const [socketId1, socketId2] = room.players;
-          const winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
-
-          settleGame(room, conn.roomId, 'forfeit', winnerSocketId);
+        room.outcome = 'forfeit';
+        const [socketId1, socketId2] = room.players;
+        
+        let winnerSocketId;
+        if (room.isBotMatch) {
+          winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
         } else {
-          // If bot match, player forfeit
-          room.outcome = 'forfeit';
-          settleGame(room, conn.roomId, 'forfeit', 'bot');
+          winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
         }
+
+        settleGame(room, conn.roomId, 'forfeit', winnerSocketId);
       }
     }
     connections.delete(socket.id);
