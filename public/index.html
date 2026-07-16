@@ -403,7 +403,7 @@
 
     <div class="seq-label" id="myRatingLabel" style="margin-top:10px;"></div>
     <div style="height:6px"></div>
-    
+
     <div class="row wrap" style="gap: 12px;">
       <button id="findMatchBtn">Find match</button>
       <button id="playBotBtn" class="ghost">Play vs Bot</button>
@@ -599,8 +599,8 @@
   function connectSocket() {
     socket = io();
 
-    socket.on('connect', () => { 
-      myId = socket.id; 
+    socket.on('connect', () => {
+      myId = socket.id;
     });
 
     socket.on('authRequired', () => {
@@ -615,7 +615,9 @@
   findMatchBtn.addEventListener('click', () => {
     if (!socket) return;
     isBotMatchActive = false;
-    socket.emit('findMatch', selectedTc);
+    // FIX: mode is now sent alongside timeControl so the server can enforce
+    // ranked vs. casual queueing and settlement correctly.
+    socket.emit('findMatch', { timeControl: selectedTc, mode: selectedMode });
     findMatchBtn.disabled = true;
     playBotBtn.disabled = true;
     cancelBtn.style.display = 'inline-block';
@@ -633,7 +635,9 @@
   });
 
   cancelBtn.addEventListener('click', () => {
-    socket.emit('cancelFind', selectedTc);
+    // FIX: mode must match what findMatch queued with, so the cancel removes
+    // the entry from the correct per-mode queue.
+    socket.emit('cancelFind', { timeControl: selectedTc, mode: selectedMode });
     findMatchBtn.disabled = false;
     playBotBtn.disabled = false;
     cancelBtn.style.display = 'none';
@@ -654,7 +658,7 @@
       roomPlayers = data.players;
       clocks = { ...data.clocks };
       isBotMatchActive = !!data.isBotMatch;
-      
+
       lobbyPanel.style.display = 'none';
       leaderboardPanel.style.display = 'none';
       sequenceWrap.style.display = 'block';
@@ -665,7 +669,7 @@
       renderPlayers();
       renderClocks();
       renderSequence([]);
-      
+
       updateTurn(data.nextTurnPlayerId || roomPlayers[0].id);
     });
 
@@ -705,8 +709,14 @@
         }
       }
 
-      if (isBotMatchActive || data.isBotMatch) {
-        text += ' (Practice match - unrated).';
+      if (isBotMatchActive || data.isBotMatch || data.isCasual || data.isSelfPlay) {
+        if (data.isSelfPlay) {
+          text += ' (Self-play match - unrated).';
+        } else if (data.isCasual) {
+          text += ' (Casual match - unrated).';
+        } else {
+          text += ' (Practice match - unrated).';
+        }
       } else {
         const myNewRating = data.ratings[myId];
         if (myNewRating !== undefined) {
@@ -747,10 +757,10 @@
     playersRow.innerHTML = '';
     roomPlayers.forEach((p, i) => {
       const tag = document.createElement('div');
-      
+
       const isMe = p.id === myId || (socket && p.id === socket.id);
       tag.className = 'player-tag' + (isMe ? ' me' : '');
-      
+
       const isPlayerBot = p.id === 'bot' || p.id.toString().startsWith('bot');
       tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} ${isPlayerBot ? '(CPU)' : '(' + p.rating + ')'}`;
       playersRow.appendChild(tag);
@@ -801,7 +811,7 @@
       lastTick = now;
       if (clocks[clockActiveId] !== undefined) {
         clocks[clockActiveId] = Math.max(0, clocks[clockActiveId] - elapsed);
-        
+
         const isMe = clockActiveId === myId || (socket && clockActiveId === socket.id);
         if (clocks[clockActiveId] <= 0 && isMe) {
           stopClockTick();
@@ -826,7 +836,7 @@
 
   function updateTurn(nextPlayerId) {
     myTurn = isBotMatchActive ? (nextPlayerId !== 'bot') : (nextPlayerId === socket.id);
-    
+
     turnIndicator.classList.toggle('your-turn', myTurn);
     turnIndicator.textContent = myTurn ? 'Your move — pick X, Y, or Z.' : "Opponent's move...";
     document.querySelectorAll('#controls button').forEach(b => b.disabled = !myTurn);

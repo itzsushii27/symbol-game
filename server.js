@@ -1,6 +1,3 @@
-console.log("DIAGNOSTIC - GOOGLE_CLIENT_ID is:", process.env.GOOGLE_CLIENT_ID ? "FOUND" : "NOT FOUND (UNDEFINED)");
-const _gitTriggerUpdate = "force_update_active";
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -23,6 +20,8 @@ const TIME_CONTROL_CONFIG = {
   blitz: { baseMs: 2 * 60 * 1000, incrementMs: 2 * 1000, label: '2|2' },
   rapid: { baseMs: 3 * 60 * 1000, incrementMs: 3 * 1000, label: '3|3' }
 };
+
+const MODES = ['ranked', 'casual'];
 
 app.set('trust proxy', 1);
 
@@ -65,12 +64,12 @@ app.get('/auth/logout', (req, res) => {
 
 app.get('/api/me', (req, res) => {
   if (req.user) {
-    res.json({ 
-      loggedIn: true, 
-      id: req.user.id, 
-      name: req.user.name, 
+    res.json({
+      loggedIn: true,
+      id: req.user.id,
+      name: req.user.name,
       nickname: req.user.nickname || req.user.name,
-      ratings: req.user.ratings 
+      ratings: req.user.ratings
     });
   } else {
     res.json({ loggedIn: false });
@@ -79,13 +78,12 @@ app.get('/api/me', (req, res) => {
 
 // Post endpoint to update nickname
 app.post('/api/nickname', (req, res) => {
-  if (!req.user) return res.status(411).json({ error: 'Unauthorized' });
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
   const { nickname } = req.body;
   if (!nickname || typeof nickname !== 'string' || nickname.trim().length === 0) {
     return res.status(400).json({ error: 'Invalid nickname' });
   }
-  
-  // Find the account and update the nickname
+
   const userAcc = accounts.get(req.user.id);
   if (userAcc) {
     userAcc.nickname = nickname.trim().substring(0, 20); // enforce limit
@@ -102,7 +100,6 @@ app.get('/api/leaderboard/:timeControl', (req, res) => {
     return res.status(400).json({ error: 'Invalid time control' });
   }
 
-  // Map accounts to list sorted by rating
   const list = Array.from(accounts.values()).map(acc => ({
     nickname: acc.nickname || acc.name,
     rating: Math.round(acc.ratings[timeControl].rating)
@@ -116,8 +113,12 @@ app.get('/api/leaderboard/:timeControl', (req, res) => {
 const connections = new Map(); // socket.id -> { accountId, roomId }
 const rooms = new Map();       // roomId -> room object
 
+// Queues are keyed per time control AND mode, so ranked and casual players
+// never get cross-matched into a room whose settlement behavior neither of them expects.
 const queues = {};
-for (const tc of TIME_CONTROLS) queues[tc] = [];
+for (const tc of TIME_CONTROLS) {
+  queues[tc] = { ranked: [], casual: [] };
+}
 
 function makeRoomId() {
   return Math.random().toString(36).slice(2, 9);
@@ -192,8 +193,14 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
   }
 
   const isBotMatch = room.isBotMatch || socketId1 === 'bot' || socketId2 === 'bot';
+  const isCasual = room.mode === 'casual';
+  // Self-play: same Google account controlling both seats (e.g. two tabs/two devices).
+  // Ratings must never move off a game an account played against itself.
+  const isSelfPlay = !!(acc1 && acc2 && acc1.id === acc2.id);
 
-  if (acc1 && acc2 && !isBotMatch) {
+  const ratable = acc1 && acc2 && !isBotMatch && !isCasual && !isSelfPlay;
+
+  if (ratable) {
     let score1 = outcome === 'draw' ? 0.5 : (winnerId === socketId1 ? 1 : 0);
     const score2 = 1 - score1;
 
@@ -208,18 +215,22 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
       outcome,
       winnerId,
       timeControl: tc,
-      ratings: { 
-        [socketId1]: newR1.rating, 
-        [socketId2]: newR2.rating 
+      mode: room.mode,
+      ratings: {
+        [socketId1]: newR1.rating,
+        [socketId2]: newR2.rating
       }
     });
   } else {
-    io.to(roomId).emit('gameOver', { 
-      outcome, 
-      winnerId, 
-      timeControl: tc, 
-      ratings: {}, 
-      isBotMatch: true 
+    io.to(roomId).emit('gameOver', {
+      outcome,
+      winnerId,
+      timeControl: tc,
+      mode: room.mode,
+      ratings: {},
+      isBotMatch,
+      isCasual,
+      isSelfPlay
     });
   }
 
@@ -233,7 +244,6 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
     if (conn2) conn2.roomId = null;
   }
 
-  // Clear timers & remove room from memory to prevent memory leaks
   clearRoomTimer(room);
   rooms.delete(roomId);
 }
@@ -243,13 +253,16 @@ function triggerBotMove(roomId) {
   if (!room || room.outcome) return;
 
   setTimeout(() => {
-    // Double check room validity after the delay
     const activeRoom = rooms.get(roomId);
     if (!activeRoom || activeRoom.outcome) return;
 
-    const botMoveSym = getBotMove(activeRoom.sequence, activeRoom.botSkill, false);
+    // FIX: use the room's recorded seat assignment instead of hardcoding `false`.
+    // Previously the bot was always told it was P2 (the minimizer), even on games
+    // where it had actually been assigned P1 — so it searched for the wrong goal
+    // and could produce nonsensical or stalled behavior.
+    const botMoveSym = getBotMove(activeRoom.sequence, activeRoom.botSkill, activeRoom.botIsP1);
     const botRes = applyMove(activeRoom.sequence, botMoveSym);
-    
+
     activeRoom.sequence = botRes.sequence;
     activeRoom.turn += 1;
     activeRoom.turnStartedAt = Date.now();
@@ -293,29 +306,30 @@ io.on('connection', (socket) => {
     if (!account) return;
 
     const roomId = makeRoomId();
-    
+
     // Randomize whether human is Player 1 (first) or Player 2 (second)
     const order = Math.random() < 0.5 ? [socket.id, 'bot'] : ['bot', socket.id];
     const config = TIME_CONTROL_CONFIG[timeControl];
-    
+    const botIsP1 = order[0] === 'bot';
+
     rooms.set(roomId, {
       sequence: [],
       turn: 0,
       players: order,
       outcome: null,
       timeControl,
+      mode: 'casual', // bot matches are always unrated practice
       clocks: { [socket.id]: config.baseMs, 'bot': config.baseMs },
       turnStartedAt: Date.now(),
       flagTimeout: null,
       isBotMatch: true,
+      botIsP1,
       botSkill: parseInt(skillLevel) || 3
     });
 
     conn.roomId = roomId;
     socket.join(roomId);
 
-    // Keep player order in matchFound stable so the frontend matches its standard schema:
-    // Human is always elements[0], Bot is always elements[1].
     socket.emit('matchFound', {
       roomId,
       timeControl,
@@ -328,17 +342,17 @@ io.on('connection', (socket) => {
       ],
       clocks: { [socket.id]: config.baseMs, 'bot': config.baseMs },
       isBotMatch: true,
-      nextTurnPlayerId: order[0] // Explicitly state who moves first
+      nextTurnPlayerId: order[0]
     });
 
-    // If bot is Player 1 (index 0), make it move first immediately
-    if (order[0] === 'bot') {
+    if (botIsP1) {
       triggerBotMove(roomId);
     }
   });
 
-  socket.on('findMatch', (timeControl) => {
+  socket.on('findMatch', ({ timeControl, mode } = {}) => {
     if (!TIME_CONTROL_CONFIG[timeControl]) return;
+    const matchMode = MODES.includes(mode) ? mode : 'ranked';
 
     const conn = connections.get(socket.id);
     if (!conn || conn.roomId) return;
@@ -347,18 +361,33 @@ io.on('connection', (socket) => {
     if (!account) return;
 
     const myRating = account.ratings[timeControl].rating;
-    const queue = queues[timeControl];
+    const queue = queues[timeControl][matchMode];
 
-    const opponentIdx = findClosestOpponent(queue, myRating);
-
+    // Never match a player against their own account (self-play), even across two tabs/devices.
+    const opponentIdx = findClosestOpponent(
+      queue.filter(e => e.accountId !== account.id),
+      myRating
+    );
+    // findClosestOpponent needs the filtered index mapped back to the real queue,
+    // so search the real queue directly while skipping same-account entries.
+    let realIdx = -1;
     if (opponentIdx !== -1) {
-      const opponentEntry = queue.splice(opponentIdx, 1)[0];
+      let seen = -1;
+      for (let i = 0; i < queue.length; i++) {
+        if (queue[i].accountId === account.id) continue;
+        seen++;
+        if (seen === opponentIdx) { realIdx = i; break; }
+      }
+    }
+
+    if (realIdx !== -1) {
+      const opponentEntry = queue.splice(realIdx, 1)[0];
       const opponentId = opponentEntry.socketId;
       const opponentSocket = io.sockets.sockets.get(opponentId);
       const opponentConn = connections.get(opponentId);
 
       if (!opponentSocket || !opponentConn) {
-        queue.push({ socketId: socket.id, rating: myRating, queuedAt: Date.now() });
+        queue.push({ socketId: socket.id, accountId: account.id, rating: myRating, queuedAt: Date.now() });
         socket.emit('queued');
         return;
       }
@@ -378,6 +407,7 @@ io.on('connection', (socket) => {
         players: order,
         outcome: null,
         timeControl,
+        mode: matchMode,
         clocks,
         turnStartedAt: Date.now(),
         flagTimeout: null,
@@ -399,6 +429,7 @@ io.on('connection', (socket) => {
         timeControlLabel: config.label,
         baseMs: config.baseMs,
         incrementMs: config.incrementMs,
+        mode: matchMode,
         players: [
           { id: order[0], name: p1Acc ? p1Acc.nickname || p1Acc.name : 'Player 1', rating: p1Acc ? Math.round(p1Acc.ratings[timeControl].rating) : 1500 },
           { id: order[1], name: p2Acc ? p2Acc.nickname || p2Acc.name : 'Player 2', rating: p2Acc ? Math.round(p2Acc.ratings[timeControl].rating) : 1500 }
@@ -409,14 +440,15 @@ io.on('connection', (socket) => {
 
       scheduleFlagCheck(roomId);
     } else {
-      queue.push({ socketId: socket.id, rating: myRating, queuedAt: Date.now() });
+      queue.push({ socketId: socket.id, accountId: account.id, rating: myRating, queuedAt: Date.now() });
       socket.emit('queued');
     }
   });
 
-  socket.on('cancelFind', (timeControl) => {
+  socket.on('cancelFind', ({ timeControl, mode } = {}) => {
     if (!TIME_CONTROL_CONFIG[timeControl]) return;
-    const queue = queues[timeControl];
+    const matchMode = MODES.includes(mode) ? mode : 'ranked';
+    const queue = queues[timeControl][matchMode];
     const idx = queue.findIndex((e) => e.socketId === socket.id);
     if (idx !== -1) queue.splice(idx, 1);
   });
@@ -472,9 +504,11 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     for (const tc of TIME_CONTROLS) {
-      const queue = queues[tc];
-      const idx = queue.findIndex((e) => e.socketId === socket.id);
-      if (idx !== -1) queue.splice(idx, 1);
+      for (const m of MODES) {
+        const queue = queues[tc][m];
+        const idx = queue.findIndex((e) => e.socketId === socket.id);
+        if (idx !== -1) queue.splice(idx, 1);
+      }
     }
 
     const conn = connections.get(socket.id);
@@ -483,14 +517,7 @@ io.on('connection', (socket) => {
       if (room && !room.outcome) {
         room.outcome = 'forfeit';
         const [socketId1, socketId2] = room.players;
-        
-        let winnerSocketId;
-        if (room.isBotMatch) {
-          winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
-        } else {
-          winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
-        }
-
+        const winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
         settleGame(room, conn.roomId, 'forfeit', winnerSocketId);
       }
     }

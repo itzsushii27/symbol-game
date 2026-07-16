@@ -1,5 +1,3 @@
-const _gitTriggerUpdate = "force_update_active";
-
 const SYMBOLS = ['X', 'Y', 'Z'];
 
 function isValidSymbol(sym) {
@@ -8,7 +6,7 @@ function isValidSymbol(sym) {
 
 function applyMove(currentSequence, newSymbol) {
   const nextSequence = [...currentSequence, newSymbol];
-  
+
   const p1Win = hasFiveWindowRepeat(nextSequence);
   const p2Win = hasThreeWindowFourTimes(nextSequence);
 
@@ -28,13 +26,18 @@ function applyMove(currentSequence, newSymbol) {
   return { sequence: nextSequence, outcome: null };
 }
 
+// FIX: was `if (seq.length < 10) return false;`
+// A 5-window repeat can legally occur as early as length 7 (overlapping windows,
+// e.g. X Y X Y X Y X -> windows [0:5] and [2:7] both equal "XYXYX"). The old guard
+// silently ignored any P1 win before length 10, which also fed a blind spot into
+// evaluateSequence()/minimax() since they call this same function.
 function hasFiveWindowRepeat(seq) {
-  if (seq.length < 10) return false;
-  
+  if (seq.length < 5) return false;
+
   const newestWindow = seq.slice(-5).join('');
   // Search up to the start index of the newest window so it doesn't match itself
   const searchLimit = seq.length - 5;
-  
+
   for (let i = 0; i < searchLimit; i++) {
     const historicalWindow = seq.slice(i, i + 5).join('');
     if (historicalWindow === newestWindow) {
@@ -79,8 +82,7 @@ function evaluateSequence(seq, ply) {
     if (seq.slice(0, -1).join('').includes(last3)) p1Score += 2;
   }
   if (len >= 2) {
-    const last2 = seq.slice(-2).join('');
-    const last2Str = last2.join('');
+    const last2Str = seq.slice(-2).join('');
     if (seq.slice(0, -1).join('').includes(last2Str)) p1Score += 1;
 
     const matchesOf2 = (seq.join('').match(new RegExp(last2Str, 'g')) || []).length;
@@ -158,6 +160,8 @@ function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
 
 const SKILL_MAP = { 0: 0, 1: 1, 2: 3, 3: 5, 4: 7, 5: 9, 6: 11, 7: 13 };
 
+// FIX: isBotP1 must reflect the bot's actual seat, not be hardcoded to false by the caller.
+// See server.js triggerBotMove() — it now reads activeRoom.botIsP1 instead of passing `false`.
 function getBotMove(sequence, skillLevel, isBotP1) {
   const depth = SKILL_MAP[skillLevel] ?? 3;
   if (depth === 0) {
@@ -171,5 +175,7 @@ module.exports = {
   isValidSymbol,
   applyMove,
   getBotMove,
+  hasFiveWindowRepeat,
+  hasThreeWindowFourTimes,
   SYMBOLS
 };
