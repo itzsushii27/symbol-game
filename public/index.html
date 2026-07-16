@@ -646,7 +646,6 @@
     });
 
     socket.on('matchFound', (data) => {
-      // Robustly capture client id from socket if connection had latency
       if (socket && socket.id) {
         myId = socket.id;
       }
@@ -667,7 +666,6 @@
       renderClocks();
       renderSequence([]);
       
-      // Explicit turn identification based strictly on server's assigned turn
       updateTurn(data.nextTurnPlayerId || roomPlayers[0].id);
     });
 
@@ -750,7 +748,6 @@
     roomPlayers.forEach((p, i) => {
       const tag = document.createElement('div');
       
-      // Dynamically confirm identity - fallback check in case of ID differences
       const isMe = p.id === myId || (socket && p.id === socket.id);
       tag.className = 'player-tag' + (isMe ? ' me' : '');
       
@@ -828,8 +825,7 @@
   }
 
   function updateTurn(nextPlayerId) {
-    // Robust local matching check
-    myTurn = (nextPlayerId === myId) || (socket && nextPlayerId === socket.id);
+    myTurn = isBotMatchActive ? (nextPlayerId !== 'bot') : (nextPlayerId === socket.id);
     
     turnIndicator.classList.toggle('your-turn', myTurn);
     turnIndicator.textContent = myTurn ? 'Your move — pick X, Y, or Z.' : "Opponent's move...";

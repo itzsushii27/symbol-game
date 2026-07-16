@@ -265,7 +265,6 @@ function triggerBotMove(roomId) {
       activeRoom.outcome = botRes.outcome;
       settleGame(activeRoom, roomId, botRes.outcome);
     } else {
-      // If next turn is also bot (unlikely but safe check)
       const nextPlayer = activeRoom.players[activeRoom.turn % 2];
       if (nextPlayer === 'bot') {
         triggerBotMove(roomId);
@@ -315,6 +314,8 @@ io.on('connection', (socket) => {
     conn.roomId = roomId;
     socket.join(roomId);
 
+    // Keep player order in matchFound stable so the frontend matches its standard schema:
+    // Human is always elements[0], Bot is always elements[1].
     socket.emit('matchFound', {
       roomId,
       timeControl,
@@ -322,19 +323,12 @@ io.on('connection', (socket) => {
       baseMs: config.baseMs,
       incrementMs: config.incrementMs,
       players: [
-        { 
-          id: order[0], 
-          name: order[0] === 'bot' ? `Bot Level ${skillLevel}` : (account.nickname || account.name), 
-          rating: order[0] === 'bot' ? 'CPU' : Math.round(account.ratings[timeControl].rating) 
-        },
-        { 
-          id: order[1], 
-          name: order[1] === 'bot' ? `Bot Level ${skillLevel}` : (account.nickname || account.name), 
-          rating: order[1] === 'bot' ? 'CPU' : Math.round(account.ratings[timeControl].rating) 
-        }
+        { id: socket.id, name: account.nickname || account.name, rating: Math.round(account.ratings[timeControl].rating) },
+        { id: 'bot', name: `Bot Level ${skillLevel}`, rating: 'CPU' }
       ],
       clocks: { [socket.id]: config.baseMs, 'bot': config.baseMs },
-      isBotMatch: true
+      isBotMatch: true,
+      nextTurnPlayerId: order[0] // Explicitly state who moves first
     });
 
     // If bot is Player 1 (index 0), make it move first immediately
