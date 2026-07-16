@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WINDOW — X Y Z Sequence Duel</title>
+<title>The XYZ Game — X Y Z Sequence Duel</title>
 <style>
   :root {
     --bg: #0b0d0f;
@@ -193,6 +193,54 @@
     color: var(--text);
   }
 
+  .tc-btn {
+    flex: 1;
+    background: var(--bg);
+    color: var(--dim);
+    border: 1px solid var(--line);
+    padding: 12px 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .tc-btn .tc-sub {
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .tc-btn.selected {
+    border-color: var(--text);
+    color: var(--text);
+    background: var(--bg-panel);
+  }
+  .tc-btn.selected .tc-sub {
+    color: var(--text);
+  }
+
+  .clock-chip {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-size: 18px;
+    font-weight: 700;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .clock-chip.active {
+    border-color: var(--text);
+    color: var(--text);
+  }
+  .clock-chip.low {
+    border-color: var(--p1);
+    color: var(--p1);
+  }
+
   .players {
     display: flex;
     gap: 12px;
@@ -232,7 +280,7 @@
 
 <header>
   <div class="eyebrow">Real-time · Rated · Two Player</div>
-  <h1>WINDOW <span class="p1">5</span> <span style="color:var(--dim); font-weight:400;">vs</span> <span class="p2">3×4</span></h1>
+  <h1>The XYZ Game <span class="p1">5</span> <span style="color:var(--dim); font-weight:400;">vs</span> <span class="p2">3×4</span></h1>
   <div class="rules">
     Players alternate placing <strong>X</strong>, <strong>Y</strong>, or <strong>Z</strong> into one shared sequence.
     <strong class="p1">P1 wins</strong> the instant any 5-symbol window repeats another 5-symbol window exactly.
@@ -245,12 +293,35 @@
 
   <div id="outcomeBanner"></div>
 
-  <div class="panel" id="lobbyPanel">
-    <div class="seq-label">Set your name</div>
+  <div class="panel" id="signInPanel" style="display:none;">
+    <div class="seq-label">Sign in to play</div>
     <div class="row">
-      <input type="text" id="nameInput" placeholder="Anonymous" maxlength="20">
+      <a href="/auth/google" id="googleSignInBtn" style="text-decoration:none;">
+        <button>Sign in with Google</button>
+      </a>
     </div>
-    <div style="height:14px"></div>
+  </div>
+
+  <div class="panel" id="lobbyPanel" style="display:none;">
+    <div class="row between">
+      <div class="seq-label" id="welcomeLabel">Welcome</div>
+      <a href="/auth/logout" style="text-decoration:none;">
+        <button class="ghost" style="font-size:12px; padding:8px 12px;">Sign out</button>
+      </a>
+    </div>
+    <div class="seq-label" style="margin-top:14px;">Time control</div>
+    <div class="row" id="timeControlRow">
+      <button class="tc-btn selected" data-tc="bullet">Bullet <span class="tc-sub">1|1</span></button>
+      <button class="tc-btn" data-tc="blitz">Blitz <span class="tc-sub">2|2</span></button>
+      <button class="tc-btn" data-tc="rapid">Rapid <span class="tc-sub">3|3</span></button>
+    </div>
+    <div class="seq-label" style="margin-top:14px;">Mode</div>
+    <div class="row" id="modeRow">
+      <button class="tc-btn selected" data-mode="ranked">Ranked <span class="tc-sub">affects rating</span></button>
+      <button class="tc-btn" data-mode="casual">Casual <span class="tc-sub">no rating change</span></button>
+    </div>
+    <div class="seq-label" id="myRatingLabel" style="margin-top:10px;"></div>
+    <div style="height:6px"></div>
     <div class="row">
       <button id="findMatchBtn">Find match</button>
       <button id="cancelBtn" class="ghost" style="display:none;">Cancel</button>
@@ -260,9 +331,10 @@
 
   <div class="panel" id="sequenceWrap">
     <div class="row between">
-      <div class="seq-label">Sequence</div>
+      <div class="seq-label" id="matchTcLabel">Sequence</div>
       <div class="players" id="playersRow"></div>
     </div>
+    <div class="row" id="clocksRow" style="margin-bottom:12px;"></div>
     <div id="sequence"></div>
     <div id="turnIndicator"></div>
     <div id="controls">
@@ -278,118 +350,192 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-  const socket = io();
-
-  const nameInput = document.getElementById('nameInput');
+  const signInPanel = document.getElementById('signInPanel');
+  const lobbyPanel = document.getElementById('lobbyPanel');
+  const welcomeLabel = document.getElementById('welcomeLabel');
+  const myRatingLabel = document.getElementById('myRatingLabel');
+  const timeControlRow = document.getElementById('timeControlRow');
+  const modeRow = document.getElementById('modeRow');
   const findMatchBtn = document.getElementById('findMatchBtn');
   const cancelBtn = document.getElementById('cancelBtn');
   const statusEl = document.getElementById('status');
-  const lobbyPanel = document.getElementById('lobbyPanel');
   const sequenceWrap = document.getElementById('sequenceWrap');
+  const matchTcLabel = document.getElementById('matchTcLabel');
   const sequenceEl = document.getElementById('sequence');
   const controlsEl = document.getElementById('controls');
   const turnIndicator = document.getElementById('turnIndicator');
   const playersRow = document.getElementById('playersRow');
+  const clocksRow = document.getElementById('clocksRow');
   const outcomeBanner = document.getElementById('outcomeBanner');
 
   let myId = null;
   let roomId = null;
   let roomPlayers = []; // [{id, name, rating}, {id, name, rating}]
   let myTurn = false;
+  let socket = null;
+  let myRatings = null; // { bullet: {rating,...}, blitz: {...}, rapid: {...} }
+  let selectedTc = 'bullet';
+  let selectedMode = 'ranked';
 
-  socket.on('connect', () => { myId = socket.id; });
+  let clocks = {};          // socketId -> ms remaining, kept in sync with server
+  let clockActiveId = null; // whose clock is currently ticking down locally
+  let clockTickHandle = null;
+
+  timeControlRow.querySelectorAll('.tc-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      selectedTc = btn.dataset.tc;
+      timeControlRow.querySelectorAll('.tc-btn').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+      updateMyRatingLabel();
+    });
+  });
+
+  modeRow.querySelectorAll('.tc-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      selectedMode = btn.dataset.mode;
+      modeRow.querySelectorAll('.tc-btn').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+    });
+  });
+
+  function updateMyRatingLabel() {
+    if (!myRatings) return;
+    myRatingLabel.textContent = `Your ${selectedTc} rating: ${myRatings[selectedTc].rating}`;
+  }
+
+  // Check login status before doing anything else.
+  fetch('/api/me')
+    .then(r => r.json())
+    .then((me) => {
+      if (me.loggedIn) {
+        myRatings = me.ratings;
+        welcomeLabel.textContent = `Welcome, ${me.name}`;
+        updateMyRatingLabel();
+        lobbyPanel.style.display = 'block';
+        connectSocket();
+      } else {
+        signInPanel.style.display = 'block';
+      }
+    })
+    .catch(() => {
+      signInPanel.style.display = 'block';
+    });
+
+  function connectSocket() {
+    socket = io();
+
+    socket.on('connect', () => { myId = socket.id; });
+
+    socket.on('authRequired', () => {
+      lobbyPanel.style.display = 'none';
+      signInPanel.style.display = 'block';
+    });
+
+    registerSocketHandlers();
+  }
 
   findMatchBtn.addEventListener('click', () => {
-    socket.emit('setName', nameInput.value);
-    socket.emit('findMatch');
+    if (!socket) return;
+    socket.emit('findMatch', selectedTc);
     findMatchBtn.disabled = true;
     cancelBtn.style.display = 'inline-block';
     statusEl.textContent = 'Searching for an opponent...';
   });
 
   cancelBtn.addEventListener('click', () => {
-    socket.emit('cancelFind');
+    socket.emit('cancelFind', selectedTc);
     findMatchBtn.disabled = false;
     cancelBtn.style.display = 'none';
     statusEl.textContent = '';
   });
 
-  socket.on('queued', () => {
-    statusEl.textContent = 'In queue — waiting for another player...';
-  });
 
-  socket.on('matchFound', (data) => {
-    roomId = data.roomId;
-    roomPlayers = data.players;
-    lobbyPanel.style.display = 'none';
-    sequenceWrap.style.display = 'block';
-    controlsEl.style.display = 'flex';
-    turnIndicator.style.display = 'block';
 
-    renderPlayers();
-    renderSequence([]);
-    updateTurn(roomPlayers[0].id); // players[0] moves first
-  });
+  function registerSocketHandlers() {
+    socket.on('queued', () => {
+      statusEl.textContent = 'In queue — waiting for another player...';
+    });
+
+    socket.on('matchFound', (data) => {
+      roomId = data.roomId;
+      roomPlayers = data.players;
+      clocks = { ...data.clocks };
+      lobbyPanel.style.display = 'none';
+      sequenceWrap.style.display = 'block';
+      controlsEl.style.display = 'flex';
+      turnIndicator.style.display = 'block';
+      matchTcLabel.textContent = `${data.timeControl[0].toUpperCase()}${data.timeControl.slice(1)} (${data.timeControlLabel})`;
+
+      renderPlayers();
+      renderClocks();
+      renderSequence([]);
+      updateTurn(roomPlayers[0].id); // players[0] moves first
+    });
+
+    socket.on('moveMade', (data) => {
+      clocks = { ...data.clocks };
+      renderSequence(data.sequence);
+      renderClocks();
+      updateTurn(data.nextTurnPlayerId);
+    });
+
+    socket.on('gameOver', (data) => {
+      stopClockTick();
+      controlsEl.style.display = 'none';
+      turnIndicator.style.display = 'none';
+
+      let text, cls;
+      if (data.outcome === 'draw') {
+        text = 'Draw — both conditions triggered on the same move.';
+        cls = 'draw';
+      } else {
+        const winner = roomPlayers.find(p => p.id === data.winnerId);
+        const winnerName = data.winnerId === myId ? 'You' : (winner ? winner.name : 'Opponent');
+        if (data.outcome === 'p1') {
+          text = `${winnerName} win${winnerName === 'You' ? '' : 's'} — 5-window repeat.`;
+          cls = 'p1win';
+        } else if (data.outcome === 'p2') {
+          text = `${winnerName} win${winnerName === 'You' ? '' : 's'} — 3-window repeated 4 times.`;
+          cls = 'p2win';
+        } else if (data.outcome === 'timeout') {
+          text = `${winnerName} win${winnerName === 'You' ? '' : 's'} on time.`;
+          cls = data.winnerId === roomPlayers[0].id ? 'p1win' : 'p2win';
+        } else if (data.outcome === 'forfeit') {
+          text = winnerName === 'You'
+            ? 'Opponent disconnected — you win by forfeit.'
+            : 'You disconnected — forfeit loss.';
+          cls = data.winnerId === roomPlayers[0].id ? 'p1win' : 'p2win';
+        }
+      }
+
+      const myNewRating = data.ratings[myId];
+      if (myNewRating !== undefined) {
+        text += ` Your ${data.timeControl} rating: ${myNewRating}.`;
+        if (myRatings) myRatings[data.timeControl].rating = myNewRating;
+      }
+
+      outcomeBanner.textContent = text;
+      outcomeBanner.className = cls;
+      outcomeBanner.style.display = 'block';
+
+      setTimeout(() => {
+        lobbyPanel.style.display = 'block';
+        sequenceWrap.style.display = 'none';
+        findMatchBtn.disabled = false;
+        cancelBtn.style.display = 'none';
+        statusEl.textContent = '';
+        outcomeBanner.style.display = 'none';
+        roomId = null;
+        updateMyRatingLabel();
+      }, 6000);
+    });
+  }
 
   document.querySelectorAll('#controls button').forEach((btn) => {
     btn.addEventListener('click', () => {
-      if (!myTurn || !roomId) return;
+      if (!myTurn || !roomId || !socket) return;
       socket.emit('makeMove', { roomId, symbol: btn.dataset.symbol });
     });
-  });
-
-  socket.on('moveMade', (data) => {
-    renderSequence(data.sequence);
-    updateTurn(data.nextTurnPlayerId);
-  });
-
-  socket.on('gameOver', (data) => {
-    controlsEl.style.display = 'none';
-    turnIndicator.style.display = 'none';
-
-    const myIndex = roomPlayers.findIndex(p => p.id === myId);
-    let text, cls;
-    if (data.outcome === 'draw') {
-      text = 'Draw — both conditions triggered on the same move.';
-      cls = 'draw';
-    } else if (data.outcome === 'p1') {
-      const winner = roomPlayers[0];
-      text = (winner.id === myId ? 'You win' : winner.name + ' wins') + ' — 5-window repeat.';
-      cls = 'p1win';
-    } else {
-      const winner = roomPlayers[1];
-      text = (winner.id === myId ? 'You win' : winner.name + ' wins') + ' — 3-window repeated 4 times.';
-      cls = 'p2win';
-    }
-
-    const myNewRating = data.ratings[myId];
-    if (myNewRating !== undefined) {
-      text += ` Your rating: ${myNewRating}.`;
-    }
-
-    outcomeBanner.textContent = text;
-    outcomeBanner.className = cls;
-    outcomeBanner.style.display = 'block';
-
-    setTimeout(() => {
-      lobbyPanel.style.display = 'block';
-      sequenceWrap.style.display = 'none';
-      findMatchBtn.disabled = false;
-      cancelBtn.style.display = 'none';
-      statusEl.textContent = '';
-      roomId = null;
-    }, 6000);
-  });
-
-  socket.on('opponentDisconnected', () => {
-    statusEl.textContent = 'Opponent disconnected.';
-    controlsEl.style.display = 'none';
-    turnIndicator.style.display = 'none';
-    setTimeout(() => {
-      lobbyPanel.style.display = 'block';
-      sequenceWrap.style.display = 'none';
-      findMatchBtn.disabled = false;
-    }, 3000);
   });
 
   function renderPlayers() {
@@ -400,6 +546,51 @@
       tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} (${p.rating})`;
       playersRow.appendChild(tag);
     });
+  }
+
+  function formatClock(ms) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  function renderClocks() {
+    clocksRow.innerHTML = '';
+    roomPlayers.forEach((p) => {
+      const chip = document.createElement('div');
+      chip.className = 'clock-chip';
+      chip.id = 'clock-' + p.id;
+      const ms = clocks[p.id] || 0;
+      chip.textContent = formatClock(ms);
+      if (ms < 10000) chip.classList.add('low');
+      if (p.id === clockActiveId) chip.classList.add('active');
+      clocksRow.appendChild(chip);
+    });
+  }
+
+  function stopClockTick() {
+    if (clockTickHandle) {
+      clearInterval(clockTickHandle);
+      clockTickHandle = null;
+    }
+    clockActiveId = null;
+  }
+
+  function startClockTick(activeId) {
+    stopClockTick();
+    clockActiveId = activeId;
+    let lastTick = Date.now();
+
+    clockTickHandle = setInterval(() => {
+      const now = Date.now();
+      const elapsed = now - lastTick;
+      lastTick = now;
+      if (clocks[clockActiveId] !== undefined) {
+        clocks[clockActiveId] = Math.max(0, clocks[clockActiveId] - elapsed);
+      }
+      renderClocks();
+    }, 250);
   }
 
   function renderSequence(seq) {
@@ -417,6 +608,7 @@
     turnIndicator.classList.toggle('your-turn', myTurn);
     turnIndicator.textContent = myTurn ? 'Your move — pick X, Y, or Z.' : "Opponent's move...";
     document.querySelectorAll('#controls button').forEach(b => b.disabled = !myTurn);
+    startClockTick(nextPlayerId);
   }
 </script>
 
