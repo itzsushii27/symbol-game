@@ -82,6 +82,7 @@
 
   .row { display: flex; gap: 10px; align-items: center; }
   .row.between { justify-content: space-between; }
+  .row.wrap { flex-wrap: wrap; }
 
   input[type=text] {
     background: var(--bg);
@@ -268,6 +269,77 @@
   #outcomeBanner.p2win { background: rgba(77,201,176,0.1); border: 1px solid var(--p2); color: var(--p2); }
   #outcomeBanner.draw { background: rgba(201,194,255,0.1); border: 1px solid var(--draw); color: var(--draw); }
 
+  /* New Elements Styling */
+  .nickname-section {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+  }
+
+  .leaderboard-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 6px;
+  }
+
+  .leaderboard-tab-btn {
+    background: transparent;
+    color: var(--dim);
+    border: none;
+    padding: 4px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .leaderboard-tab-btn.active {
+    color: var(--text);
+    border-bottom: 1px solid var(--text);
+    border-radius: 0;
+  }
+
+  .leaderboard-list {
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .leaderboard-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 6px;
+    border-radius: 4px;
+  }
+
+  .leaderboard-row:nth-child(even) {
+    background: var(--bg);
+  }
+
+  .leaderboard-rank {
+    color: var(--dim);
+    width: 24px;
+    display: inline-block;
+  }
+
+  .difficulty-section {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  .difficulty-slider {
+    width: 100%;
+    accent-color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    outline: none;
+    height: 6px;
+    cursor: pointer;
+  }
+
   footer {
     margin-top: 30px;
     font-size: 11px;
@@ -303,30 +375,63 @@
   </div>
 
   <div class="panel" id="lobbyPanel" style="display:none;">
-    <div class="row between">
-      <div class="seq-label" id="welcomeLabel">Welcome</div>
+    <div class="row between nickname-section">
+      <div>
+        <div class="seq-label" id="welcomeLabel">Welcome</div>
+        <div class="row" style="margin-top: 6px;">
+          <input type="text" id="nicknameInput" placeholder="Enter nickname..." style="max-width: 180px; padding: 6px 10px; font-size: 12px;" />
+          <button id="saveNicknameBtn" style="padding: 6px 12px; font-size: 11px;">Save</button>
+        </div>
+      </div>
       <a href="/auth/logout" style="text-decoration:none;">
         <button class="ghost" style="font-size:12px; padding:8px 12px;">Sign out</button>
       </a>
     </div>
+
     <div class="seq-label" style="margin-top:14px;">Time control</div>
     <div class="row" id="timeControlRow">
       <button class="tc-btn selected" data-tc="bullet">Bullet <span class="tc-sub">1|1</span></button>
       <button class="tc-btn" data-tc="blitz">Blitz <span class="tc-sub">2|2</span></button>
       <button class="tc-btn" data-tc="rapid">Rapid <span class="tc-sub">3|3</span></button>
     </div>
+
     <div class="seq-label" style="margin-top:14px;">Mode</div>
     <div class="row" id="modeRow">
       <button class="tc-btn selected" data-mode="ranked">Ranked <span class="tc-sub">affects rating</span></button>
       <button class="tc-btn" data-mode="casual">Casual <span class="tc-sub">no rating change</span></button>
     </div>
+
     <div class="seq-label" id="myRatingLabel" style="margin-top:10px;"></div>
     <div style="height:6px"></div>
-    <div class="row">
+    
+    <div class="row wrap" style="gap: 12px;">
       <button id="findMatchBtn">Find match</button>
+      <button id="playBotBtn" class="ghost">Play vs Bot</button>
       <button id="cancelBtn" class="ghost" style="display:none;">Cancel</button>
     </div>
+
+    <div class="difficulty-section" id="botDifficultyWrapper" style="display: none;">
+      <div class="seq-label" style="display: flex; justify-content: space-between;">
+        <span>Bot Difficulty</span>
+        <span id="botDiffVal">Level 3</span>
+      </div>
+      <input type="range" id="botDiffSlider" class="difficulty-slider" min="0" max="7" value="3" />
+    </div>
+
     <div id="status"></div>
+  </div>
+
+  <!-- Dynamic Leaderboard Panel -->
+  <div class="panel" id="leaderboardPanel" style="display:none;">
+    <div class="seq-label">Leaderboard</div>
+    <div class="leaderboard-tabs">
+      <button class="leaderboard-tab-btn active" data-tab="bullet">Bullet</button>
+      <button class="leaderboard-tab-btn" data-tab="blitz">Blitz</button>
+      <button class="leaderboard-tab-btn" data-tab="rapid">Rapid</button>
+    </div>
+    <div class="leaderboard-list" id="leaderboardList">
+      <!-- loaded via API -->
+    </div>
   </div>
 
   <div class="panel" id="sequenceWrap">
@@ -352,11 +457,16 @@
 <script>
   const signInPanel = document.getElementById('signInPanel');
   const lobbyPanel = document.getElementById('lobbyPanel');
+  const leaderboardPanel = document.getElementById('leaderboardPanel');
+  const leaderboardList = document.getElementById('leaderboardList');
   const welcomeLabel = document.getElementById('welcomeLabel');
+  const nicknameInput = document.getElementById('nicknameInput');
+  const saveNicknameBtn = document.getElementById('saveNicknameBtn');
   const myRatingLabel = document.getElementById('myRatingLabel');
   const timeControlRow = document.getElementById('timeControlRow');
   const modeRow = document.getElementById('modeRow');
   const findMatchBtn = document.getElementById('findMatchBtn');
+  const playBotBtn = document.getElementById('playBotBtn');
   const cancelBtn = document.getElementById('cancelBtn');
   const statusEl = document.getElementById('status');
   const sequenceWrap = document.getElementById('sequenceWrap');
@@ -367,6 +477,9 @@
   const playersRow = document.getElementById('playersRow');
   const clocksRow = document.getElementById('clocksRow');
   const outcomeBanner = document.getElementById('outcomeBanner');
+  const botDifficultyWrapper = document.getElementById('botDifficultyWrapper');
+  const botDiffSlider = document.getElementById('botDiffSlider');
+  const botDiffVal = document.getElementById('botDiffVal');
 
   let myId = null;
   let roomId = null;
@@ -376,17 +489,20 @@
   let myRatings = null; // { bullet: {rating,...}, blitz: {...}, rapid: {...} }
   let selectedTc = 'bullet';
   let selectedMode = 'ranked';
+  let isBotMatchActive = false;
 
   let clocks = {};          // socketId -> ms remaining, kept in sync with server
   let clockActiveId = null; // whose clock is currently ticking down locally
   let clockTickHandle = null;
 
+  // Sync TC button selection
   timeControlRow.querySelectorAll('.tc-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       selectedTc = btn.dataset.tc;
       timeControlRow.querySelectorAll('.tc-btn').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
       updateMyRatingLabel();
+      fetchLeaderboard(selectedTc);
     });
   });
 
@@ -395,12 +511,70 @@
       selectedMode = btn.dataset.mode;
       modeRow.querySelectorAll('.tc-btn').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
+      
+      if (selectedMode === 'casual') {
+        botDifficultyWrapper.style.display = 'block';
+      } else {
+        botDifficultyWrapper.style.display = 'none';
+      }
     });
+  });
+
+  botDiffSlider.addEventListener('input', (e) => {
+    botDiffVal.textContent = `Level ${e.target.value}`;
   });
 
   function updateMyRatingLabel() {
     if (!myRatings) return;
     myRatingLabel.textContent = `Your ${selectedTc} rating: ${myRatings[selectedTc].rating}`;
+  }
+
+  // Handle Nickname Saves
+  saveNicknameBtn.addEventListener('click', () => {
+    const nick = nicknameInput.value.trim();
+    if (!nick) return;
+    fetch('/api/nickname', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nickname: nick })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        welcomeLabel.textContent = `Welcome, ${data.nickname}`;
+        fetchLeaderboard(selectedTc);
+      }
+    });
+  });
+
+  // Handle Leaderboard Tabs
+  document.querySelectorAll('.leaderboard-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.leaderboard-tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      fetchLeaderboard(btn.dataset.tab);
+    });
+  });
+
+  function fetchLeaderboard(tc) {
+    fetch(`/api/leaderboard/${tc}`)
+      .then(r => r.json())
+      .then(players => {
+        leaderboardList.innerHTML = '';
+        if (players.length === 0) {
+          leaderboardList.innerHTML = '<div style="color: var(--dim)">No placements yet.</div>';
+          return;
+        }
+        players.forEach((p, idx) => {
+          const row = document.createElement('div');
+          row.className = 'leaderboard-row';
+          row.innerHTML = `
+            <div><span class="leaderboard-rank">#${idx + 1}</span> ${p.nickname}</div>
+            <div style="font-weight: 700;">${p.rating}</div>
+          `;
+          leaderboardList.appendChild(row);
+        });
+      });
   }
 
   // Check login status before doing anything else.
@@ -409,9 +583,12 @@
     .then((me) => {
       if (me.loggedIn) {
         myRatings = me.ratings;
-        welcomeLabel.textContent = `Welcome, ${me.name}`;
+        welcomeLabel.textContent = `Welcome, ${me.nickname || me.name}`;
+        nicknameInput.value = me.nickname || me.name;
         updateMyRatingLabel();
         lobbyPanel.style.display = 'block';
+        leaderboardPanel.style.display = 'block';
+        fetchLeaderboard(selectedTc);
         connectSocket();
       } else {
         signInPanel.style.display = 'block';
@@ -428,6 +605,7 @@
 
     socket.on('authRequired', () => {
       lobbyPanel.style.display = 'none';
+      leaderboardPanel.style.display = 'none';
       signInPanel.style.display = 'block';
     });
 
@@ -436,20 +614,31 @@
 
   findMatchBtn.addEventListener('click', () => {
     if (!socket) return;
+    isBotMatchActive = false;
     socket.emit('findMatch', selectedTc);
     findMatchBtn.disabled = true;
+    playBotBtn.disabled = true;
     cancelBtn.style.display = 'inline-block';
     statusEl.textContent = 'Searching for an opponent...';
+  });
+
+  playBotBtn.addEventListener('click', () => {
+    if (!socket) return;
+    isBotMatchActive = true;
+    const skillLevel = parseInt(botDiffSlider.value);
+    socket.emit('findBotMatch', { timeControl: selectedTc, skillLevel });
+    findMatchBtn.disabled = true;
+    playBotBtn.disabled = true;
+    statusEl.textContent = 'Starting training matches with bot...';
   });
 
   cancelBtn.addEventListener('click', () => {
     socket.emit('cancelFind', selectedTc);
     findMatchBtn.disabled = false;
+    playBotBtn.disabled = false;
     cancelBtn.style.display = 'none';
     statusEl.textContent = '';
   });
-
-
 
   function registerSocketHandlers() {
     socket.on('queued', () => {
@@ -461,10 +650,11 @@
       roomPlayers = data.players;
       clocks = { ...data.clocks };
       lobbyPanel.style.display = 'none';
+      leaderboardPanel.style.display = 'none';
       sequenceWrap.style.display = 'block';
       controlsEl.style.display = 'flex';
       turnIndicator.style.display = 'block';
-      matchTcLabel.textContent = `${data.timeControl[0].toUpperCase()}${data.timeControl.slice(1)} (${data.timeControlLabel})`;
+      matchTcLabel.textContent = `${data.timeControl[0].toUpperCase()}${data.timeControl.slice(1)} (${data.timeControlLabel}) ${data.isBotMatch ? '[VS CPU]' : ''}`;
 
       renderPlayers();
       renderClocks();
@@ -508,10 +698,14 @@
         }
       }
 
-      const myNewRating = data.ratings[myId];
-      if (myNewRating !== undefined) {
-        text += ` Your ${data.timeControl} rating: ${myNewRating}.`;
-        if (myRatings) myRatings[data.timeControl].rating = myNewRating;
+      if (!data.isBotMatch) {
+        const myNewRating = data.ratings[myId];
+        if (myNewRating !== undefined) {
+          text += ` Your ${data.timeControl} rating: ${myNewRating}.`;
+          if (myRatings) myRatings[data.timeControl].rating = myNewRating;
+        }
+      } else {
+        text += ' (Practice matches do not affect rating).';
       }
 
       outcomeBanner.textContent = text;
@@ -520,13 +714,16 @@
 
       setTimeout(() => {
         lobbyPanel.style.display = 'block';
+        leaderboardPanel.style.display = 'block';
         sequenceWrap.style.display = 'none';
         findMatchBtn.disabled = false;
+        playBotBtn.disabled = false;
         cancelBtn.style.display = 'none';
         statusEl.textContent = '';
         outcomeBanner.style.display = 'none';
         roomId = null;
         updateMyRatingLabel();
+        fetchLeaderboard(selectedTc);
       }, 6000);
     });
   }
@@ -543,7 +740,7 @@
     roomPlayers.forEach((p, i) => {
       const tag = document.createElement('div');
       tag.className = 'player-tag' + (p.id === myId ? ' me' : '');
-      tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} (${p.rating})`;
+      tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} ${typeof p.rating === 'number' ? '(' + p.rating + ')' : '(CPU)'}`;
       playersRow.appendChild(tag);
     });
   }
@@ -581,6 +778,9 @@
     stopClockTick();
     clockActiveId = activeId;
     let lastTick = Date.now();
+
+    // Do not tick down clocks for bots
+    if (activeId === 'bot') return;
 
     clockTickHandle = setInterval(() => {
       const now = Date.now();
