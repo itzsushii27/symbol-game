@@ -34,6 +34,21 @@ const sessionMiddleware = session({
 
 configurePassport();
 
+// 1. Tell Express to trust Render's HTTPS proxy
+app.set('trust proxy', 1);
+
+// 2. Define the session middleware with secure settings
+const sessionMiddleware = session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: true,      // Must be true on Render
+    sameSite: 'none'   // Must be 'none' for secure cookies
+  }
+});
+
+// 3. Your existing code stays exactly the same right after:
 app.use(sessionMiddleware);
 app.use(passport.initialize());
 app.use(passport.session());
