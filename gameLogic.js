@@ -32,10 +32,11 @@ function hasFiveWindowRepeat(seq) {
   if (seq.length < 10) return false;
   
   const newestWindow = seq.slice(-5).join('');
-  const history = seq.slice(0, -1);
+  // Search up to the start index of the newest window so it doesn't match itself
+  const searchLimit = seq.length - 5;
   
-  for (let i = 0; i <= history.length - 5; i++) {
-    const historicalWindow = history.slice(i, i + 5).join('');
+  for (let i = 0; i < searchLimit; i++) {
+    const historicalWindow = seq.slice(i, i + 5).join('');
     if (historicalWindow === newestWindow) {
       return true;
     }
