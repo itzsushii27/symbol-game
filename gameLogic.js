@@ -9,14 +9,18 @@ function isValidSymbol(sym) {
 function applyMove(currentSequence, newSymbol) {
   const nextSequence = [...currentSequence, newSymbol];
   
-  if (hasFiveWindowRepeat(nextSequence)) {
+  const p1Win = hasFiveWindowRepeat(nextSequence);
+  const p2Win = hasThreeWindowFourTimes(nextSequence);
+
+  if (p1Win && p2Win) {
+    return { sequence: nextSequence, outcome: 'draw' };
+  }
+  if (p1Win) {
     return { sequence: nextSequence, outcome: 'p1' };
   }
-  
-  if (hasThreeWindowFourTimes(nextSequence)) {
+  if (p2Win) {
     return { sequence: nextSequence, outcome: 'p2' };
   }
-  
   if (nextSequence.length >= 100) {
     return { sequence: nextSequence, outcome: 'draw' };
   }
@@ -26,10 +30,15 @@ function applyMove(currentSequence, newSymbol) {
 
 function hasFiveWindowRepeat(seq) {
   if (seq.length < 10) return false;
-  for (let i = 0; i <= seq.length - 10; i++) {
-    const chunk1 = seq.slice(i, i + 5).join('');
-    const chunk2 = seq.slice(i + 5, i + 10).join('');
-    if (chunk1 === chunk2) return true;
+  
+  const newestWindow = seq.slice(-5).join('');
+  const history = seq.slice(0, -1);
+  
+  for (let i = 0; i <= history.length - 5; i++) {
+    const historicalWindow = history.slice(i, i + 5).join('');
+    if (historicalWindow === newestWindow) {
+      return true;
+    }
   }
   return false;
 }
