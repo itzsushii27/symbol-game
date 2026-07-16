@@ -277,3 +277,77 @@ io.on('connection', (socket) => {
   socket.on('cancelFind', (timeControl) => {
     if (!TIME_CONTROL_CONFIG[timeControl]) return;
     const queue = queues[timeControl];
+    const idx = queue.findIndex((e) => e.socketId === socket.id);
+    if (idx !== -1) queue.splice(idx, 1);
+  });
+
+  socket.on('makeMove', ({ roomId, symbol }) => {
+    const room = rooms.get(roomId);
+    if (!room || room.outcome) return;
+    if (!isValidSymbol(symbol)) return;
+
+    const currentPlayerId = room.players[room.turn % 2];
+    if (currentPlayerId !== socket.id) return; // not your turn
+
+    clearRoomTimer(room);
+
+    // Deduct elapsed time from the mover's clock, then add increment.
+    const elapsed = Date.now() - room.turnStartedAt;
+    const config = TIME_CONTROL_CONFIG[room.timeControl];
+    room.clocks[socket.id] = Math.max(room.clocks[socket.id] - elapsed, 0);
+
+    if (room.clocks[socket.id] <= 0) {
+      handleFlag(roomId, socket.id);
+      return;
+    }
+
+    room.clocks[socket.id] += config.incrementMs;
+
+    const { sequence, outcome } = applyMove(room.sequence, symbol);
+    room.sequence = sequence;
+    room.turn += 1;
+    room.turnStartedAt = Date.now();
+
+    io.to(roomId).emit('moveMade', {
+      symbol,
+      sequence: room.sequence,
+      nextTurnPlayerId: room.players[room.turn % 2],
+      clocks: room.clocks
+    });
+
+    if (outcome) {
+      room.outcome = outcome;
+      settleGame(room, roomId, outcome);
+    } else {
+      scheduleFlagCheck(roomId);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    for (const tc of TIME_CONTROLS) {
+      const queue = queues[tc];
+      const idx = queue.findIndex((e) => e.socketId === socket.id);
+      if (idx !== -1) queue.splice(idx, 1);
+    }
+
+    const conn = connections.get(socket.id);
+    if (conn && conn.roomId) {
+      const room = rooms.get(conn.roomId);
+      if (room && !room.outcome) {
+        clearRoomTimer(room);
+        room.outcome = 'forfeit';
+
+        const [socketId1, socketId2] = room.players;
+        const winnerSocketId = socket.id === socketId1 ? socketId2 : socketId1;
+
+        settleGame(room, conn.roomId, 'forfeit', winnerSocketId);
+      }
+    }
+    connections.delete(socket.id);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
