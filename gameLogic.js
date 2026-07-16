@@ -1,7 +1,6 @@
-// gameLogic.js
 const _gitTriggerUpdate = "force_update_active";
 
-const SYMBOLS = ['A', 'B', 'C'];
+const SYMBOLS = ['X', 'Y', 'Z'];
 
 function isValidSymbol(sym) {
   return SYMBOLS.includes(sym);
