@@ -269,7 +269,7 @@
   #outcomeBanner.p2win { background: rgba(77,201,176,0.1); border: 1px solid var(--p2); color: var(--p2); }
   #outcomeBanner.draw { background: rgba(201,194,255,0.1); border: 1px solid var(--draw); color: var(--draw); }
 
-  /* New Elements Styling */
+  /* Custom Styling Elements */
   .nickname-section {
     border-bottom: 1px solid var(--line);
     padding-bottom: 16px;
@@ -647,12 +647,14 @@
       roomId = data.roomId;
       roomPlayers = data.players;
       clocks = { ...data.clocks };
+      isBotMatchActive = !!data.isBotMatch;
+      
       lobbyPanel.style.display = 'none';
       leaderboardPanel.style.display = 'none';
       sequenceWrap.style.display = 'block';
       controlsEl.style.display = 'flex';
       turnIndicator.style.display = 'block';
-      matchTcLabel.textContent = `${data.timeControl[0].toUpperCase()}${data.timeControl.slice(1)} (${data.timeControlLabel}) ${data.isBotMatch ? '[VS CPU]' : ''}`;
+      matchTcLabel.textContent = `${data.timeControl[0].toUpperCase()}${data.timeControl.slice(1)} (${data.timeControlLabel}) ${isBotMatchActive ? '[UNRATED PRACTICE]' : ''}`;
 
       renderPlayers();
       renderClocks();
@@ -696,14 +698,15 @@
         }
       }
 
-      if (!data.isBotMatch) {
+      // Explicitly enforce bot matches are unrated in the UI presentation
+      if (isBotMatchActive || data.isBotMatch) {
+        text += ' (Practice match - unrated).';
+      } else {
         const myNewRating = data.ratings[myId];
         if (myNewRating !== undefined) {
           text += ` Your ${data.timeControl} rating: ${myNewRating}.`;
           if (myRatings) myRatings[data.timeControl].rating = myNewRating;
         }
-      } else {
-        text += ' (Practice matches do not affect rating).';
       }
 
       outcomeBanner.textContent = text;
@@ -720,6 +723,7 @@
         statusEl.textContent = '';
         outcomeBanner.style.display = 'none';
         roomId = null;
+        isBotMatchActive = false;
         updateMyRatingLabel();
         fetchLeaderboard(selectedTc);
       }, 6000);
@@ -738,7 +742,9 @@
     roomPlayers.forEach((p, i) => {
       const tag = document.createElement('div');
       tag.className = 'player-tag' + (p.id === myId ? ' me' : '');
-      tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} ${typeof p.rating === 'number' ? '(' + p.rating + ')' : '(CPU)'}`;
+      // Bot matches get labeled CPU with no ratings visible
+      const isPlayerBot = p.id === 'bot' || p.id.toString().startsWith('bot');
+      tag.textContent = `${i === 0 ? 'P1' : 'P2'} ${p.name} ${isPlayerBot ? '(CPU)' : '(' + p.rating + ')'}`;
       playersRow.appendChild(tag);
     });
   }
@@ -777,8 +783,10 @@
     clockActiveId = activeId;
     let lastTick = Date.now();
 
-    // Do not tick down clocks for bots
-    if (activeId === 'bot') return;
+    // Do not tick down clocks locally if the active turn ID is the bot CPU
+    if (activeId && activeId.toString().startsWith('bot')) {
+      return;
+    }
 
     clockTickHandle = setInterval(() => {
       const now = Date.now();
@@ -786,6 +794,14 @@
       lastTick = now;
       if (clocks[clockActiveId] !== undefined) {
         clocks[clockActiveId] = Math.max(0, clocks[clockActiveId] - elapsed);
+        
+        // If your player clock hits 0 locally, emit a timeout event to notify the server immediately
+        if (clocks[clockActiveId] <= 0 && clockActiveId === myId) {
+          stopClockTick();
+          if (socket && roomId) {
+            socket.emit('playerTimeout', { roomId });
+          }
+        }
       }
       renderClocks();
     }, 250);
