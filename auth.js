@@ -1,4 +1,6 @@
 // auth.js
+const _gitTriggerUpdate = "force_update_active";
+
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 

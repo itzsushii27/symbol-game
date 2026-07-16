@@ -1,4 +1,5 @@
 // gameLogic.js
+const _gitTriggerUpdate = "force_update_active";
 
 const SYMBOLS = ['A', 'B', 'C'];
 

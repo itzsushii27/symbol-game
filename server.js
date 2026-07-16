@@ -1,4 +1,6 @@
 console.log("DIAGNOSTIC - GOOGLE_CLIENT_ID is:", process.env.GOOGLE_CLIENT_ID ? "FOUND" : "NOT FOUND (UNDEFINED)");
+const _gitTriggerUpdate = "force_update_active";
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
