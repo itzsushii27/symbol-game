@@ -1,59 +1,52 @@
+// auth.js
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const { defaultRating } = require('./rating');
 
+const accounts = new Map(); // database mock
 const TIME_CONTROLS = ['bullet', 'blitz', 'rapid'];
 
-// In-memory account store, keyed by Google profile id.
-// Swap this Map for a real database later if you want accounts to
-// survive server restarts (Render free tier restarts periodically).
-const accounts = new Map(); // googleId -> { id, name, email, ratings: { bullet, blitz, rapid } }
-
-function freshRatings() {
-  const ratings = {};
-  for (const tc of TIME_CONTROLS) {
-    ratings[tc] = defaultRating();
-  }
-  return ratings;
-}
-
-function getOrCreateAccount(profile) {
-  const existing = accounts.get(profile.id);
-  if (existing) return existing;
-
-  const account = {
+function createUser(profile) {
+  const newUser = {
     id: profile.id,
-    name: profile.displayName || 'Player',
-    email: (profile.emails && profile.emails[0] && profile.emails[0].value) || null,
-    ratings: freshRatings()
+    name: profile.displayName,
+    nickname: profile.displayName, // default nickname is their real display name
+    ratings: {
+      bullet: { rating: 1500, rd: 350, vol: 0.06 },
+      blitz: { rating: 1500, rd: 350, vol: 0.06 },
+      rapid: { rating: 1500, rd: 350, vol: 0.06 }
+    }
   };
-  accounts.set(profile.id, account);
-  return account;
+  accounts.set(profile.id, newUser);
+  return newUser;
 }
 
 function configurePassport() {
-  const callbackBase = process.env.OAUTH_CALLBACK_BASE || 'http://localhost:3000';
-
-  passport.use(new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${callbackBase}/auth/google/callback`
+  passport.use(new GoogleStrategy({
+      clientID: process.env.GOOGLE_CLIENT_ID || 'dummy-id',
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || 'dummy-secret',
+      callbackURL: '/auth/google/callback'
     },
     (accessToken, refreshToken, profile, done) => {
-      const account = getOrCreateAccount(profile);
-      return done(null, account);
+      let user = accounts.get(profile.id);
+      if (!user) {
+        user = createUser(profile);
+      }
+      return done(null, user);
     }
   ));
 
-  passport.serializeUser((account, done) => {
-    done(null, account.id);
+  passport.serializeUser((user, done) => {
+    done(null, user.id);
   });
 
   passport.deserializeUser((id, done) => {
-    const account = accounts.get(id) || null;
-    done(null, account);
+    const user = accounts.get(id);
+    done(null, user || null);
   });
 }
 
-module.exports = { configurePassport, accounts, getOrCreateAccount, TIME_CONTROLS };
+module.exports = {
+  configurePassport,
+  accounts,
+  TIME_CONTROLS
+};
