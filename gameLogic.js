@@ -4,45 +4,46 @@ function isValidSymbol(sym) {
   return SYMBOLS.includes(sym);
 }
 
-function applyMove(currentSequence, newSymbol) {
-  const nextSequence = [...currentSequence, newSymbol];
+// Hard cap. By pigeonhole it can never actually be reached: there are only 27
+// distinct 3-symbol windows, and P2 wins as soon as any one of them occurs a 4th
+// time, so every game is over by length 84 at the latest. Kept as a safety net.
+const MAX_LENGTH = 100;
 
-  const p1Win = hasFiveWindowRepeat(nextSequence);
-  const p2Win = hasThreeWindowFourTimes(nextSequence);
+// The single source of truth for "is this sequence finished, and how?".
+// Overlapping windows count. P1 and P2 conditions can fire on the same move
+// (e.g. XXXXXX: the 5-window XXXXX appears at 0 and 1, AND the 3-window XXX
+// appears 4 times) and that is a draw.
+// Returns 'p1' | 'p2' | 'draw' | null.
+function getOutcome(seq) {
+  const p1Win = hasFiveWindowRepeat(seq);
+  const p2Win = hasThreeWindowFourTimes(seq);
 
-  if (p1Win && p2Win) {
-    return { sequence: nextSequence, outcome: 'draw' };
-  }
-  if (p1Win) {
-    return { sequence: nextSequence, outcome: 'p1' };
-  }
-  if (p2Win) {
-    return { sequence: nextSequence, outcome: 'p2' };
-  }
-  if (nextSequence.length >= 100) {
-    return { sequence: nextSequence, outcome: 'draw' };
-  }
-
-  return { sequence: nextSequence, outcome: null };
+  if (p1Win && p2Win) return 'draw';
+  if (p1Win) return 'p1';
+  if (p2Win) return 'p2';
+  if (seq.length >= MAX_LENGTH) return 'draw';
+  return null;
 }
 
-// FIX: was `if (seq.length < 10) return false;`
-// A 5-window repeat can legally occur as early as length 7 (overlapping windows,
-// e.g. X Y X Y X Y X -> windows [0:5] and [2:7] both equal "XYXYX"). The old guard
-// silently ignored any P1 win before length 10, which also fed a blind spot into
-// evaluateSequence()/minimax() since they call this same function.
+function applyMove(currentSequence, newSymbol) {
+  const nextSequence = [...currentSequence, newSymbol];
+  return { sequence: nextSequence, outcome: getOutcome(nextSequence) };
+}
+
+// True if ANY 5-symbol window occurs more than once (windows may overlap).
+// Overlapping repeats can happen as early as length 6 (XXXXXX: windows [0:5] and
+// [1:6] are both XXXXX) and length 7 for the alternating case
+// (XYXYXYX: [0:5] and [2:7] are both XYXYX).
+// This checks every window rather than only the newest one, so it is correct for
+// any sequence handed to it, not just ones built one move at a time.
 function hasFiveWindowRepeat(seq) {
-  if (seq.length < 5) return false;
+  if (seq.length < 6) return false;
 
-  const newestWindow = seq.slice(-5).join('');
-  // Search up to the start index of the newest window so it doesn't match itself
-  const searchLimit = seq.length - 5;
-
-  for (let i = 0; i < searchLimit; i++) {
-    const historicalWindow = seq.slice(i, i + 5).join('');
-    if (historicalWindow === newestWindow) {
-      return true;
-    }
+  const seen = new Set();
+  for (let i = 0; i + 5 <= seq.length; i++) {
+    const w = seq[i] + seq[i + 1] + seq[i + 2] + seq[i + 3] + seq[i + 4];
+    if (seen.has(w)) return true;
+    seen.add(w);
   }
   return false;
 }
@@ -59,12 +60,14 @@ function hasThreeWindowFourTimes(seq) {
 }
 
 function evaluateSequence(seq, ply) {
-  if (hasFiveWindowRepeat(seq)) {
-    return 5.0 - (ply * 0.05);
-  }
-  if (hasThreeWindowFourTimes(seq)) {
-    return -5.0 + (ply * 0.05);
-  }
+  // FIX: terminal positions are decided by getOutcome(), so a simultaneous
+  // P1+P2 trigger scores as a draw (0). Before, a 5-window repeat was checked
+  // first and returned +5 even when the same move also gave P2 its win, so the
+  // bot believed it had WON positions like XXXXXX that are actually draws.
+  const terminal = getOutcome(seq);
+  if (terminal === 'draw') return 0;
+  if (terminal === 'p1') return 5.0 - (ply * 0.05);
+  if (terminal === 'p2') return -5.0 + (ply * 0.05);
 
   let p1Score = 0;
   let p2Score = 0;
@@ -123,9 +126,9 @@ function evaluateSequence(seq, ply) {
 }
 
 function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
-  if (hasFiveWindowRepeat(seq)) return { score: evaluateSequence(seq, ply) };
-  if (hasThreeWindowFourTimes(seq)) return { score: evaluateSequence(seq, ply) };
-  if (depth === 0 || seq.length >= 100) return { score: evaluateSequence(seq, ply) };
+  if (getOutcome(seq) !== null || depth === 0) {
+    return { score: evaluateSequence(seq, ply) };
+  }
 
   let bestMove = null;
 
@@ -159,6 +162,15 @@ function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
 }
 
 const SKILL_MAP = { 0: 0, 1: 1, 2: 3, 3: 5, 4: 7, 5: 9, 6: 11, 7: 13 };
+const DEFAULT_SKILL = 3;
+
+// FIX: the server used `parseInt(skillLevel) || 3`, and since 0 is falsy, picking
+// Level 0 (the random bot) silently gave you Level 3. Anything that isn't a valid
+// level falls back to the default instead.
+function normalizeSkillLevel(raw) {
+  const n = Number.parseInt(raw, 10);
+  return Object.prototype.hasOwnProperty.call(SKILL_MAP, n) ? n : DEFAULT_SKILL;
+}
 
 // FIX: isBotP1 must reflect the bot's actual seat, not be hardcoded to false by the caller.
 // See server.js triggerBotMove() — it now reads activeRoom.botIsP1 instead of passing `false`.
@@ -174,8 +186,12 @@ function getBotMove(sequence, skillLevel, isBotP1) {
 module.exports = {
   isValidSymbol,
   applyMove,
+  getOutcome,
   getBotMove,
+  normalizeSkillLevel,
+  evaluateSequence,
   hasFiveWindowRepeat,
   hasThreeWindowFourTimes,
-  SYMBOLS
+  SYMBOLS,
+  MAX_LENGTH
 };

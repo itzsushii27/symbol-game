@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -5,9 +6,17 @@ const path = require('path');
 const session = require('express-session');
 const passport = require('passport');
 
-const { applyMove, isValidSymbol, getBotMove } = require('./gameLogic');
-const { updateRating } = require('./rating');
-const { configurePassport, accounts, TIME_CONTROLS } = require('./auth');
+const { applyMove, isValidSymbol, getBotMove, normalizeSkillLevel } = require('./gameLogic');
+const { isRatedGame, applyRatedResult } = require('./rating');
+const {
+  configurePassport,
+  initAccounts,
+  flushAccounts,
+  saveAccounts,
+  createAccount,
+  accounts,
+  TIME_CONTROLS
+} = require('./auth');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,10 +32,40 @@ const TIME_CONTROL_CONFIG = {
 
 const MODES = ['ranked', 'casual'];
 
+// Socket payloads come straight from the network, so treat them as untrusted.
+// Destructuring null (or a non-object) throws, and an exception inside a socket
+// handler is uncaught and kills the whole server process for every player.
+function payloadOf(raw) {
+  return raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+}
+
+// Strict check: a plain truthiness test on TIME_CONTROL_CONFIG[value] also passes for
+// names like "constructor" or "__proto__", which then crash the queue lookups.
+function isTimeControl(value) {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TIME_CONTROL_CONFIG, value);
+}
+
+// A game only counts as played once both players have made a move. If someone
+// disconnects or runs out of time before that, the game is aborted: no winner,
+// and nobody's rating changes.
+const MIN_MOVES_FOR_RESULT = 2;
+
 app.set('trust proxy', 1);
 
+// Without a SESSION_SECRET anyone who has read this repo could forge a login
+// cookie, so fall back to a random per-run secret rather than a public constant.
+// (Sessions already live in memory, so restarts sign everyone out regardless.)
+let sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) {
+  sessionSecret = crypto.randomBytes(32).toString('hex');
+  console.warn('[server] SESSION_SECRET is not set; using a random one for this run. Set it in your environment.');
+}
+
+const sessionStore = new session.MemoryStore();
+
 const sessionMiddleware = session({
-  secret: process.env.SESSION_SECRET || 'dev-only-secret-change-me',
+  secret: sessionSecret,
+  store: sessionStore,
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -36,6 +75,7 @@ const sessionMiddleware = session({
   }
 });
 
+initAccounts();
 configurePassport();
 
 app.use(sessionMiddleware);
@@ -49,8 +89,12 @@ io.engine.use(passport.session());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // --- Auth routes ---
+// Google sign-in doubles as account creation: a returning Google account logs in;
+// a new one is asked to choose a username (see /api/signup below).
+// `select_account` makes Google show the account chooser, so a new player picks
+// which Google account the permanent username will be tied to.
 app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'] })
+  passport.authenticate('google', { scope: ['profile'], prompt: 'select_account' })
 );
 
 app.get('/auth/google/callback',
@@ -63,34 +107,35 @@ app.get('/auth/logout', (req, res) => {
 });
 
 app.get('/api/me', (req, res) => {
-  if (req.user) {
+  if (req.user && !req.user.pending) {
     res.json({
       loggedIn: true,
-      id: req.user.id,
-      name: req.user.name,
-      nickname: req.user.nickname || req.user.name,
+      username: req.user.username,
       ratings: req.user.ratings
     });
+  } else if (req.user && req.user.pending) {
+    // Signed in with Google, but no game account yet.
+    res.json({ loggedIn: false, needsUsername: true });
   } else {
     res.json({ loggedIn: false });
   }
 });
 
-// Post endpoint to update nickname
-app.post('/api/nickname', (req, res) => {
-  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-  const { nickname } = req.body;
-  if (!nickname || typeof nickname !== 'string' || nickname.trim().length === 0) {
-    return res.status(400).json({ error: 'Invalid nickname' });
+// Create the account for the Google user who is currently signed in. The username
+// is permanent: there is deliberately no endpoint to change it.
+app.post('/api/signup', (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Please sign in with Google first.' });
+  }
+  if (!req.user.pending) {
+    return res.status(409).json({ error: 'You already have an account.' });
   }
 
-  const userAcc = accounts.get(req.user.id);
-  if (userAcc) {
-    userAcc.nickname = nickname.trim().substring(0, 20); // enforce limit
-    req.user.nickname = userAcc.nickname;
-    return res.json({ success: true, nickname: userAcc.nickname });
+  const result = createAccount(req.user.id, req.body && req.body.username);
+  if (!result.ok) {
+    return res.status(result.status).json({ error: result.error });
   }
-  return res.status(500).json({ error: 'Account not found' });
+  res.json({ success: true, username: result.account.username });
 });
 
 // Endpoint to fetch leaderboard
@@ -100,10 +145,13 @@ app.get('/api/leaderboard/:timeControl', (req, res) => {
     return res.status(400).json({ error: 'Invalid time control' });
   }
 
-  const list = Array.from(accounts.values()).map(acc => ({
-    nickname: acc.nickname || acc.name,
-    rating: Math.round(acc.ratings[timeControl].rating)
-  }));
+  // Only players who have actually played a rated game in this time control.
+  const list = Array.from(accounts.values())
+    .filter(acc => acc.ratings[timeControl].games > 0)
+    .map(acc => ({
+      username: acc.username,
+      rating: Math.round(acc.ratings[timeControl].rating)
+    }));
 
   list.sort((a, b) => b.rating - a.rating);
   res.json(list.slice(0, 10)); // return top 10
@@ -130,10 +178,13 @@ function accountForSocket(socketId) {
   return accounts.get(conn.accountId) || null;
 }
 
-function findClosestOpponent(queue, rating) {
+// Closest-rated waiting player, never the searcher's own account (no self-play,
+// even across two tabs/devices). Returns the index into `queue`, or -1.
+function findClosestOpponent(queue, rating, ownAccountId) {
   let bestIdx = -1;
   let bestDiff = Infinity;
   for (let i = 0; i < queue.length; i++) {
+    if (queue[i].accountId === ownAccountId) continue;
     const diff = Math.abs(queue[i].rating - rating);
     if (diff < bestDiff) {
       bestDiff = diff;
@@ -141,6 +192,20 @@ function findClosestOpponent(queue, rating) {
     }
   }
   return bestIdx;
+}
+
+// A socket should only ever be waiting in ONE queue. Otherwise a player searching
+// in two places (two modes/time controls, or clicking Find twice) could be matched
+// into two games at once, with the second match overwriting their room state.
+function removeFromAllQueues(socketId) {
+  for (const tc of TIME_CONTROLS) {
+    for (const m of MODES) {
+      const queue = queues[tc][m];
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i].socketId === socketId) queue.splice(i, 1);
+      }
+    }
+  }
 }
 
 function clearRoomTimer(room) {
@@ -183,6 +248,12 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
   const acc2 = socketId2 === 'bot' ? null : accountForSocket(socketId2);
   const tc = room.timeControl;
 
+  // Leaving or flagging before the game really started isn't a loss, it's an abort.
+  if ((outcome === 'timeout' || outcome === 'forfeit') && room.sequence.length < MIN_MOVES_FOR_RESULT) {
+    outcome = 'aborted';
+  }
+
+  // 'draw' and 'aborted' have no winner.
   let winnerId = null;
   if (outcome === 'timeout' || outcome === 'forfeit') {
     winnerId = explicitWinnerSocketId;
@@ -192,47 +263,35 @@ function settleGame(room, roomId, outcome, explicitWinnerSocketId) {
     winnerId = socketId2;
   }
 
-  const isBotMatch = room.isBotMatch || socketId1 === 'bot' || socketId2 === 'bot';
+  const isBotMatch = !!room.isBotMatch || socketId1 === 'bot' || socketId2 === 'bot';
   const isCasual = room.mode === 'casual';
   // Self-play: same Google account controlling both seats (e.g. two tabs/two devices).
-  // Ratings must never move off a game an account played against itself.
   const isSelfPlay = !!(acc1 && acc2 && acc1.id === acc2.id);
 
-  const ratable = acc1 && acc2 && !isBotMatch && !isCasual && !isSelfPlay;
+  // rating.js is the single place that decides whether a game may move ratings.
+  const rated = isRatedGame({ mode: room.mode, isBotMatch, acc1, acc2, outcome });
 
-  if (ratable) {
-    let score1 = outcome === 'draw' ? 0.5 : (winnerId === socketId1 ? 1 : 0);
-    const score2 = 1 - score1;
-
-    const r1 = acc1.ratings[tc];
-    const r2 = acc2.ratings[tc];
-    const newR1 = updateRating(r1, r2, score1);
-    const newR2 = updateRating(r2, r1, score2);
-    acc1.ratings[tc] = newR1;
-    acc2.ratings[tc] = newR2;
-
-    io.to(roomId).emit('gameOver', {
-      outcome,
-      winnerId,
-      timeControl: tc,
-      mode: room.mode,
-      ratings: {
-        [socketId1]: newR1.rating,
-        [socketId2]: newR2.rating
-      }
-    });
-  } else {
-    io.to(roomId).emit('gameOver', {
-      outcome,
-      winnerId,
-      timeControl: tc,
-      mode: room.mode,
-      ratings: {},
-      isBotMatch,
-      isCasual,
-      isSelfPlay
-    });
+  let ratings = {};
+  if (rated) {
+    const winnerSeat = winnerId === null ? null : (winnerId === socketId1 ? 0 : 1);
+    const { rating1, rating2 } = applyRatedResult(acc1, acc2, tc, winnerSeat);
+    ratings = {
+      [socketId1]: rating1.rating,
+      [socketId2]: rating2.rating
+    };
+    saveAccounts();
   }
+
+  io.to(roomId).emit('gameOver', {
+    outcome,
+    winnerId,
+    timeControl: tc,
+    mode: room.mode,
+    ratings,
+    isBotMatch,
+    isCasual,
+    isSelfPlay
+  });
 
   // Cleanup player connection states
   if (socketId1 !== 'bot') {
@@ -256,10 +315,7 @@ function triggerBotMove(roomId) {
     const activeRoom = rooms.get(roomId);
     if (!activeRoom || activeRoom.outcome) return;
 
-    // FIX: use the room's recorded seat assignment instead of hardcoding `false`.
-    // Previously the bot was always told it was P2 (the minimizer), even on games
-    // where it had actually been assigned P1 — so it searched for the wrong goal
-    // and could produce nonsensical or stalled behavior.
+    // The bot must search for the goal of the seat it was actually assigned.
     const botMoveSym = getBotMove(activeRoom.sequence, activeRoom.botSkill, activeRoom.botIsP1);
     const botRes = applyMove(activeRoom.sequence, botMoveSym);
 
@@ -293,19 +349,29 @@ io.on('connection', (socket) => {
     socket.emit('authRequired');
     return;
   }
+  if (user.pending) {
+    // Signed in with Google but hasn't created an account (chosen a username) yet.
+    socket.emit('signupRequired');
+    return;
+  }
 
   connections.set(socket.id, { accountId: user.id, roomId: null });
 
   // Bot matchmaking event handler
-  socket.on('findBotMatch', ({ timeControl, skillLevel }) => {
-    if (!TIME_CONTROL_CONFIG[timeControl]) return;
+  socket.on('findBotMatch', (raw) => {
+    const { timeControl, skillLevel } = payloadOf(raw);
+    if (!isTimeControl(timeControl)) return;
     const conn = connections.get(socket.id);
     if (!conn || conn.roomId) return;
 
     const account = accountForSocket(socket.id);
     if (!account) return;
 
+    // Starting a bot game cancels any search in progress.
+    removeFromAllQueues(socket.id);
+
     const roomId = makeRoomId();
+    const skill = normalizeSkillLevel(skillLevel);
 
     // Randomize whether human is Player 1 (first) or Player 2 (second)
     const order = Math.random() < 0.5 ? [socket.id, 'bot'] : ['bot', socket.id];
@@ -324,7 +390,7 @@ io.on('connection', (socket) => {
       flagTimeout: null,
       isBotMatch: true,
       botIsP1,
-      botSkill: parseInt(skillLevel) || 3
+      botSkill: skill
     });
 
     conn.roomId = roomId;
@@ -337,8 +403,8 @@ io.on('connection', (socket) => {
       baseMs: config.baseMs,
       incrementMs: config.incrementMs,
       players: [
-        { id: socket.id, name: account.nickname || account.name, rating: Math.round(account.ratings[timeControl].rating) },
-        { id: 'bot', name: `Bot Level ${skillLevel}`, rating: 'CPU' }
+        { id: socket.id, name: account.username, rating: Math.round(account.ratings[timeControl].rating) },
+        { id: 'bot', name: `Bot Level ${skill}`, rating: 'CPU' }
       ],
       clocks: { [socket.id]: config.baseMs, 'bot': config.baseMs },
       isBotMatch: true,
@@ -350,8 +416,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('findMatch', ({ timeControl, mode } = {}) => {
-    if (!TIME_CONTROL_CONFIG[timeControl]) return;
+  socket.on('findMatch', (raw) => {
+    const { timeControl, mode } = payloadOf(raw);
+    if (!isTimeControl(timeControl)) return;
     const matchMode = MODES.includes(mode) ? mode : 'ranked';
 
     const conn = connections.get(socket.id);
@@ -360,37 +427,35 @@ io.on('connection', (socket) => {
     const account = accountForSocket(socket.id);
     if (!account) return;
 
+    // One search at a time: a new search replaces any earlier one from this socket.
+    removeFromAllQueues(socket.id);
+
     const myRating = account.ratings[timeControl].rating;
     const queue = queues[timeControl][matchMode];
 
-    // Never match a player against their own account (self-play), even across two tabs/devices.
-    const opponentIdx = findClosestOpponent(
-      queue.filter(e => e.accountId !== account.id),
-      myRating
-    );
-    // findClosestOpponent needs the filtered index mapped back to the real queue,
-    // so search the real queue directly while skipping same-account entries.
-    let realIdx = -1;
-    if (opponentIdx !== -1) {
-      let seen = -1;
-      for (let i = 0; i < queue.length; i++) {
-        if (queue[i].accountId === account.id) continue;
-        seen++;
-        if (seen === opponentIdx) { realIdx = i; break; }
+    // Find the closest-rated opponent who is genuinely still available. A queue entry
+    // can be stale (their socket is gone, or they're somehow already in a game); drop
+    // those and keep looking instead of giving up.
+    let opponentEntry = null;
+    let opponentSocket = null;
+    let opponentConn = null;
+    while (true) {
+      const idx = findClosestOpponent(queue, myRating, account.id);
+      if (idx === -1) break;
+      const candidate = queue.splice(idx, 1)[0];
+      const candidateSocket = io.sockets.sockets.get(candidate.socketId);
+      const candidateConn = connections.get(candidate.socketId);
+      if (candidateSocket && candidateConn && !candidateConn.roomId) {
+        opponentEntry = candidate;
+        opponentSocket = candidateSocket;
+        opponentConn = candidateConn;
+        break;
       }
     }
 
-    if (realIdx !== -1) {
-      const opponentEntry = queue.splice(realIdx, 1)[0];
+    if (opponentEntry) {
       const opponentId = opponentEntry.socketId;
-      const opponentSocket = io.sockets.sockets.get(opponentId);
-      const opponentConn = connections.get(opponentId);
-
-      if (!opponentSocket || !opponentConn) {
-        queue.push({ socketId: socket.id, accountId: account.id, rating: myRating, queuedAt: Date.now() });
-        socket.emit('queued');
-        return;
-      }
+      removeFromAllQueues(opponentId);
 
       const roomId = makeRoomId();
       const order = Math.random() < 0.5 ? [socket.id, opponentId] : [opponentId, socket.id];
@@ -431,8 +496,8 @@ io.on('connection', (socket) => {
         incrementMs: config.incrementMs,
         mode: matchMode,
         players: [
-          { id: order[0], name: p1Acc ? p1Acc.nickname || p1Acc.name : 'Player 1', rating: p1Acc ? Math.round(p1Acc.ratings[timeControl].rating) : 1500 },
-          { id: order[1], name: p2Acc ? p2Acc.nickname || p2Acc.name : 'Player 2', rating: p2Acc ? Math.round(p2Acc.ratings[timeControl].rating) : 1500 }
+          { id: order[0], name: p1Acc ? p1Acc.username : 'Player 1', rating: p1Acc ? Math.round(p1Acc.ratings[timeControl].rating) : 1500 },
+          { id: order[1], name: p2Acc ? p2Acc.username : 'Player 2', rating: p2Acc ? Math.round(p2Acc.ratings[timeControl].rating) : 1500 }
         ],
         clocks,
         isBotMatch: false
@@ -445,15 +510,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('cancelFind', ({ timeControl, mode } = {}) => {
-    if (!TIME_CONTROL_CONFIG[timeControl]) return;
-    const matchMode = MODES.includes(mode) ? mode : 'ranked';
-    const queue = queues[timeControl][matchMode];
-    const idx = queue.findIndex((e) => e.socketId === socket.id);
-    if (idx !== -1) queue.splice(idx, 1);
+  // Cancel always removes this player from every queue, whatever time control or
+  // mode the client says it is on. (Trusting the client's current selection left
+  // "ghost" queue entries behind if they changed the buttons while searching.)
+  socket.on('cancelFind', () => {
+    removeFromAllQueues(socket.id);
   });
 
-  socket.on('makeMove', ({ roomId, symbol }) => {
+  socket.on('makeMove', (raw) => {
+    const { roomId, symbol } = payloadOf(raw);
     const room = rooms.get(roomId);
     if (!room || room.outcome) return;
     if (!isValidSymbol(symbol)) return;
@@ -503,13 +568,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    for (const tc of TIME_CONTROLS) {
-      for (const m of MODES) {
-        const queue = queues[tc][m];
-        const idx = queue.findIndex((e) => e.socketId === socket.id);
-        if (idx !== -1) queue.splice(idx, 1);
-      }
-    }
+    removeFromAllQueues(socket.id);
 
     const conn = connections.get(socket.id);
     if (conn && conn.roomId) {
@@ -525,7 +584,26 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+function start(port = process.env.PORT || 3000) {
+  return new Promise((resolve) => {
+    server.listen(port, () => {
+      const actualPort = server.address().port;
+      console.log(`Server running on port ${actualPort}`);
+      resolve(actualPort);
+    });
+  });
+}
+
+// Save any pending account changes before the host stops the process.
+function shutdown() {
+  flushAccounts();
+  process.exit(0);
+}
+
+if (require.main === module) {
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  start();
+}
+
+module.exports = { app, server, io, start, sessionStore, rooms, queues, connections };

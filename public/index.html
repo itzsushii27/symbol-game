@@ -366,10 +366,32 @@
   <div id="outcomeBanner"></div>
 
   <div class="panel" id="signInPanel" style="display:none;">
-    <div class="seq-label">Sign in to play</div>
+    <div class="seq-label">Sign in or create an account</div>
     <div class="row">
       <a href="/auth/google" id="googleSignInBtn" style="text-decoration:none;">
-        <button>Sign in with Google</button>
+        <button>Continue with Google</button>
+      </a>
+    </div>
+    <div style="font-size:12px; color: var(--dim); margin-top:12px; line-height:1.5;">
+      New here? After signing in with Google you'll choose a username to create your account.
+    </div>
+  </div>
+
+  <div class="panel" id="signupPanel" style="display:none;">
+    <div class="seq-label">Create your account</div>
+    <div style="font-size:13px; color: var(--dim); line-height:1.6; margin-bottom:14px;">
+      You're signed in with Google. Choose a username to finish creating your account.
+      It's how other players will see you, and <strong style="color: var(--text);">it can't be changed later</strong>.
+    </div>
+    <div class="row">
+      <input type="text" id="usernameInput" placeholder="Username (3–20 letters, numbers, _)" maxlength="20"
+             autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <button id="createAccountBtn">Create account</button>
+    </div>
+    <div id="signupError" style="font-size:13px; color: var(--p1); margin-top:10px; min-height:18px;"></div>
+    <div class="row" style="margin-top:8px;">
+      <a href="/auth/logout" style="text-decoration:none;">
+        <button class="ghost" style="font-size:12px; padding:8px 12px;">Use a different Google account</button>
       </a>
     </div>
   </div>
@@ -378,10 +400,6 @@
     <div class="row between nickname-section">
       <div>
         <div class="seq-label" id="welcomeLabel">Welcome</div>
-        <div class="row" style="margin-top: 6px;">
-          <input type="text" id="nicknameInput" placeholder="Enter nickname..." style="max-width: 180px; padding: 6px 10px; font-size: 12px;" />
-          <button id="saveNicknameBtn" style="padding: 6px 12px; font-size: 11px;">Save</button>
-        </div>
       </div>
       <a href="/auth/logout" style="text-decoration:none;">
         <button class="ghost" style="font-size:12px; padding:8px 12px;">Sign out</button>
@@ -456,12 +474,14 @@
 <script src="/socket.io/socket.io.js"></script>
 <script>
   const signInPanel = document.getElementById('signInPanel');
+  const signupPanel = document.getElementById('signupPanel');
+  const usernameInput = document.getElementById('usernameInput');
+  const createAccountBtn = document.getElementById('createAccountBtn');
+  const signupError = document.getElementById('signupError');
   const lobbyPanel = document.getElementById('lobbyPanel');
   const leaderboardPanel = document.getElementById('leaderboardPanel');
   const leaderboardList = document.getElementById('leaderboardList');
   const welcomeLabel = document.getElementById('welcomeLabel');
-  const nicknameInput = document.getElementById('nicknameInput');
-  const saveNicknameBtn = document.getElementById('saveNicknameBtn');
   const myRatingLabel = document.getElementById('myRatingLabel');
   const timeControlRow = document.getElementById('timeControlRow');
   const modeRow = document.getElementById('modeRow');
@@ -527,22 +547,37 @@
     myRatingLabel.textContent = `Your ${selectedTc} rating: ${myRatings[selectedTc].rating}`;
   }
 
-  // Handle Nickname Saves
-  saveNicknameBtn.addEventListener('click', () => {
-    const nick = nicknameInput.value.trim();
-    if (!nick) return;
-    fetch('/api/nickname', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nickname: nick })
-    })
-    .then(r => r.json())
-    .then(data => {
-      if (data.success) {
-        welcomeLabel.textContent = `Welcome, ${data.nickname}`;
-        fetchLeaderboard(selectedTc);
+  // Create the account for the Google user who is signed in. The username is
+  // permanent, so there is no way to change it afterwards.
+  async function submitSignup() {
+    const username = usernameInput.value.trim();
+    signupError.textContent = '';
+    createAccountBtn.disabled = true;
+    try {
+      const r = await fetch('/api/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.success) {
+        await loadMe();
+      } else if (r.status === 401 || (r.status === 409 && data.error === 'You already have an account.')) {
+        // Session expired, or the account already exists: re-check where we stand.
+        await loadMe();
+      } else {
+        signupError.textContent = data.error || 'Something went wrong. Please try again.';
       }
-    });
+    } catch (e) {
+      signupError.textContent = 'Could not reach the server. Please try again.';
+    } finally {
+      createAccountBtn.disabled = false;
+    }
+  }
+
+  createAccountBtn.addEventListener('click', submitSignup);
+  usernameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitSignup();
   });
 
   // Handle Leaderboard Tabs
@@ -564,37 +599,62 @@
           return;
         }
         players.forEach((p, idx) => {
+          // Built with textContent (not innerHTML) so a name can never inject markup.
           const row = document.createElement('div');
           row.className = 'leaderboard-row';
-          row.innerHTML = `
-            <div><span class="leaderboard-rank">#${idx + 1}</span> ${p.nickname}</div>
-            <div style="font-weight: 700;">${p.rating}</div>
-          `;
+
+          const left = document.createElement('div');
+          const rank = document.createElement('span');
+          rank.className = 'leaderboard-rank';
+          rank.textContent = `#${idx + 1}`;
+          left.appendChild(rank);
+          left.appendChild(document.createTextNode(` ${p.username}`));
+
+          const right = document.createElement('div');
+          right.style.fontWeight = '700';
+          right.textContent = p.rating;
+
+          row.appendChild(left);
+          row.appendChild(right);
           leaderboardList.appendChild(row);
         });
       });
   }
 
-  // Check login status before doing anything else.
-  fetch('/api/me')
-    .then(r => r.json())
-    .then((me) => {
-      if (me.loggedIn) {
-        myRatings = me.ratings;
-        welcomeLabel.textContent = `Welcome, ${me.nickname || me.name}`;
-        nicknameInput.value = me.nickname || me.name;
-        updateMyRatingLabel();
-        lobbyPanel.style.display = 'block';
-        leaderboardPanel.style.display = 'block';
-        fetchLeaderboard(selectedTc);
-        connectSocket();
-      } else {
-        signInPanel.style.display = 'block';
-      }
-    })
-    .catch(() => {
+  // Work out which screen to show: signed out, signed in with Google but no account
+  // yet (pick a username), or fully signed in.
+  function applyMe(me) {
+    signInPanel.style.display = 'none';
+    signupPanel.style.display = 'none';
+    lobbyPanel.style.display = 'none';
+    leaderboardPanel.style.display = 'none';
+
+    if (me.loggedIn) {
+      myRatings = me.ratings;
+      welcomeLabel.textContent = `Welcome, ${me.username}`;
+      updateMyRatingLabel();
+      lobbyPanel.style.display = 'block';
+      leaderboardPanel.style.display = 'block';
+      fetchLeaderboard(selectedTc);
+      if (!socket) connectSocket();
+    } else if (me.needsUsername) {
+      signupPanel.style.display = 'block';
+      usernameInput.focus();
+    } else {
       signInPanel.style.display = 'block';
-    });
+    }
+  }
+
+  // Check login status before doing anything else.
+  function loadMe() {
+    return fetch('/api/me')
+      .then(r => r.json())
+      .then(applyMe)
+      .catch(() => {
+        signInPanel.style.display = 'block';
+      });
+  }
+  loadMe();
 
   function connectSocket() {
     socket = io();
@@ -603,11 +663,10 @@
       myId = socket.id;
     });
 
-    socket.on('authRequired', () => {
-      lobbyPanel.style.display = 'none';
-      leaderboardPanel.style.display = 'none';
-      signInPanel.style.display = 'block';
-    });
+    // Not signed in (e.g. the session expired), or signed in with Google but no
+    // account yet: re-check and show the right screen.
+    socket.on('authRequired', loadMe);
+    socket.on('signupRequired', loadMe);
 
     registerSocketHandlers();
   }
@@ -635,9 +694,9 @@
   });
 
   cancelBtn.addEventListener('click', () => {
-    // FIX: mode must match what findMatch queued with, so the cancel removes
-    // the entry from the correct per-mode queue.
-    socket.emit('cancelFind', { timeControl: selectedTc, mode: selectedMode });
+    // The server removes this player from every queue, so it doesn't matter if
+    // the time control / mode buttons were changed while searching.
+    socket.emit('cancelFind');
     findMatchBtn.disabled = false;
     playBotBtn.disabled = false;
     cancelBtn.style.display = 'none';
@@ -689,6 +748,10 @@
       if (data.outcome === 'draw') {
         text = 'Draw — both conditions triggered on the same move.';
         cls = 'draw';
+      } else if (data.outcome === 'aborted') {
+        // Someone left or ran out of time before both players had moved.
+        text = 'Game aborted — it ended before both players had moved. No rating change.';
+        cls = 'draw';
       } else {
         const winner = roomPlayers.find(p => p.id === data.winnerId);
         const winnerName = data.winnerId === myId ? 'You' : (winner ? winner.name : 'Opponent');
@@ -707,6 +770,11 @@
             : 'You disconnected — forfeit loss.';
           cls = data.winnerId === roomPlayers[0].id ? 'p1win' : 'p2win';
         }
+      }
+
+      if (!text) {
+        text = 'Game over.';
+        cls = 'draw';
       }
 
       if (isBotMatchActive || data.isBotMatch || data.isCasual || data.isSelfPlay) {
