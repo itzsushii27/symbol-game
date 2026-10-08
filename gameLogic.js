@@ -1,36 +1,46 @@
 const SYMBOLS = ['X', 'Y', 'Z'];
 
+// If nobody has won after this many plies (letters in the sequence), the game is a draw.
+const MAX_PLIES = 50;
+
+// Terminal score for a win. Heuristic scores are clamped well below this,
+// so a real win can never be outranked by a "good-looking" non-terminal position.
+const WIN_SCORE = 5;
+const HEURISTIC_CLAMP = 4.9;
+// Small per-ply nudge so faster wins / slower losses are preferred.
+// Must stay small: WIN_SCORE - MAX_PLIES * PLY_PENALTY (= 4.0) has to stay above the
+// heuristic's real maximum (3.5), so a heuristic position never outranks a real win.
+const PLY_PENALTY = 0.02;
+
 function isValidSymbol(sym) {
   return SYMBOLS.includes(sym);
 }
 
-function applyMove(currentSequence, newSymbol) {
-  const nextSequence = [...currentSequence, newSymbol];
+// Single source of truth for game state.
+// Returns 'p1', 'p2', 'draw', or null (game continues).
+//  - P1 wins if any 5-letter window appears twice (overlaps allowed).
+//  - P2 wins if any 3-letter window appears 4 times (overlaps allowed).
+//  - Both at once is a draw (checked FIRST so it is never mistaken for a win).
+//  - Reaching MAX_PLIES with no winner is a draw.
+function getOutcome(seq) {
+  const p1Win = hasFiveWindowRepeat(seq);
+  const p2Win = hasThreeWindowFourTimes(seq);
 
-  const p1Win = hasFiveWindowRepeat(nextSequence);
-  const p2Win = hasThreeWindowFourTimes(nextSequence);
-
-  if (p1Win && p2Win) {
-    return { sequence: nextSequence, outcome: 'draw' };
-  }
-  if (p1Win) {
-    return { sequence: nextSequence, outcome: 'p1' };
-  }
-  if (p2Win) {
-    return { sequence: nextSequence, outcome: 'p2' };
-  }
-  if (nextSequence.length >= 100) {
-    return { sequence: nextSequence, outcome: 'draw' };
-  }
-
-  return { sequence: nextSequence, outcome: null };
+  if (p1Win && p2Win) return 'draw';
+  if (p1Win) return 'p1';
+  if (p2Win) return 'p2';
+  if (seq.length >= MAX_PLIES) return 'draw';
+  return null;
 }
 
-// FIX: was `if (seq.length < 10) return false;`
-// A 5-window repeat can legally occur as early as length 7 (overlapping windows,
-// e.g. X Y X Y X Y X -> windows [0:5] and [2:7] both equal "XYXYX"). The old guard
-// silently ignored any P1 win before length 10, which also fed a blind spot into
-// evaluateSequence()/minimax() since they call this same function.
+function applyMove(currentSequence, newSymbol) {
+  const nextSequence = [...currentSequence, newSymbol];
+  return { sequence: nextSequence, outcome: getOutcome(nextSequence) };
+}
+
+// A 5-window repeat is checked for the newest window against all earlier ones.
+// Because applyMove runs after every move, this catches every repeat the moment it happens.
+// The earliest possible repeat is at length 6 (XXXXXX: windows [0:5] and [1:6] are both "XXXXX").
 function hasFiveWindowRepeat(seq) {
   if (seq.length < 5) return false;
 
@@ -58,49 +68,62 @@ function hasThreeWindowFourTimes(seq) {
   return false;
 }
 
-function evaluateSequence(seq, ply) {
-  if (hasFiveWindowRepeat(seq)) {
-    return 5.0 - (ply * 0.05);
+// Counts occurrences of `sub` in `str`, INCLUDING overlapping ones
+// (matches the game rule: XXXXXX contains XXX four times).
+function countOverlapping(str, sub) {
+  let count = 0;
+  let pos = str.indexOf(sub);
+  while (pos !== -1) {
+    count++;
+    pos = str.indexOf(sub, pos + 1);
   }
-  if (hasThreeWindowFourTimes(seq)) {
-    return -5.0 + (ply * 0.05);
-  }
+  return count;
+}
 
+// Score from P1's point of view: positive is good for P1, negative is good for P2.
+function terminalScore(outcome, ply) {
+  if (outcome === 'p1') return WIN_SCORE - ply * PLY_PENALTY;   // faster wins are better
+  if (outcome === 'p2') return -(WIN_SCORE - ply * PLY_PENALTY);
+  return 0; // draw
+}
+
+function heuristicScore(seq) {
   let p1Score = 0;
   let p2Score = 0;
   const len = seq.length;
 
   if (len === 0) return 0;
 
+  const full = seq.join('');
+  const prior = seq.slice(0, -1).join('');
+
   // P1 Heuristics
-  if (len >= 4) {
-    const last4 = seq.slice(-4).join('');
-    if (seq.slice(0, -1).join('').includes(last4)) p1Score += 3;
-  }
-  if (len >= 3) {
-    const last3 = seq.slice(-3).join('');
-    if (seq.slice(0, -1).join('').includes(last3)) p1Score += 2;
+  // The 4-, 3- and 2-letter suffix matches do NOT stack: only the longest
+  // suffix that has appeared before is scored (3, else 2, else 1).
+  if (len >= 4 && prior.includes(seq.slice(-4).join(''))) {
+    p1Score += 3;
+  } else if (len >= 3 && prior.includes(seq.slice(-3).join(''))) {
+    p1Score += 2;
+  } else if (len >= 2 && prior.includes(seq.slice(-2).join(''))) {
+    p1Score += 1;
   }
   if (len >= 2) {
     const last2Str = seq.slice(-2).join('');
-    if (seq.slice(0, -1).join('').includes(last2Str)) p1Score += 1;
-
-    const matchesOf2 = (seq.join('').match(new RegExp(last2Str, 'g')) || []).length;
+    const matchesOf2 = countOverlapping(full, last2Str);
     p1Score += Math.min(matchesOf2 * 0.05, 0.2);
   }
 
   let p1ProximityBonus = 0;
   SYMBOLS.forEach(sym => {
-    const testSeq = [...seq, sym];
-    if (hasFiveWindowRepeat(testSeq)) p1ProximityBonus += 0.1;
+    if (hasFiveWindowRepeat([...seq, sym])) p1ProximityBonus += 0.1;
   });
   p1Score += Math.min(p1ProximityBonus, 0.3);
 
   // P2 Heuristics
   if (len >= 3) {
     const last3Str = seq.slice(-3).join('');
-    const priorSeqStr = seq.slice(0, -1).join('');
-    const occurrences = (priorSeqStr.match(new RegExp(last3Str, 'g')) || []).length;
+    // Overlapping count, so XXX in XXXXXX counts correctly
+    const occurrences = countOverlapping(prior, last3Str);
     if (occurrences === 1) p2Score += 1;
     else if (occurrences === 2) p2Score += 2;
     else if (occurrences >= 3) p2Score += 3;
@@ -108,24 +131,31 @@ function evaluateSequence(seq, ply) {
 
   if (len >= 2) {
     const last2Str = seq.slice(-2).join('');
-    const matchesOf2 = (seq.join('').match(new RegExp(last2Str, 'g')) || []).length;
+    const matchesOf2 = countOverlapping(full, last2Str);
     p2Score += Math.min(matchesOf2 * 0.05, 0.2);
   }
 
   let p2ProximityBonus = 0;
   SYMBOLS.forEach(sym => {
-    const testSeq = [...seq, sym];
-    if (hasThreeWindowFourTimes(testSeq)) p2ProximityBonus += 0.1;
+    if (hasThreeWindowFourTimes([...seq, sym])) p2ProximityBonus += 0.1;
   });
   p2Score += Math.min(p2ProximityBonus, 0.3);
 
-  return p1Score - p2Score;
+  const raw = p1Score - p2Score;
+  return Math.max(-HEURISTIC_CLAMP, Math.min(HEURISTIC_CLAMP, raw));
 }
 
-function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
-  if (hasFiveWindowRepeat(seq)) return { score: evaluateSequence(seq, ply) };
-  if (hasThreeWindowFourTimes(seq)) return { score: evaluateSequence(seq, ply) };
-  if (depth === 0 || seq.length >= 100) return { score: evaluateSequence(seq, ply) };
+// Kept for backwards compatibility with any caller of the old function.
+function evaluateSequence(seq) {
+  const outcome = getOutcome(seq);
+  if (outcome) return terminalScore(outcome, seq.length);
+  return heuristicScore(seq);
+}
+
+function minimax(seq, depth, alpha, beta, isMaximizing) {
+  const outcome = getOutcome(seq);
+  if (outcome) return { score: terminalScore(outcome, seq.length) };
+  if (depth === 0) return { score: heuristicScore(seq) };
 
   let bestMove = null;
 
@@ -133,7 +163,7 @@ function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
     let maxEval = -Infinity;
     for (const sym of SYMBOLS) {
       const nextSeq = [...seq, sym];
-      const evaluation = minimax(nextSeq, depth - 1, alpha, beta, false, ply + 1).score;
+      const evaluation = minimax(nextSeq, depth - 1, alpha, beta, false).score;
       if (evaluation > maxEval) {
         maxEval = evaluation;
         bestMove = sym;
@@ -146,7 +176,7 @@ function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
     let minEval = Infinity;
     for (const sym of SYMBOLS) {
       const nextSeq = [...seq, sym];
-      const evaluation = minimax(nextSeq, depth - 1, alpha, beta, true, ply + 1).score;
+      const evaluation = minimax(nextSeq, depth - 1, alpha, beta, true).score;
       if (evaluation < minEval) {
         minEval = evaluation;
         bestMove = sym;
@@ -160,14 +190,14 @@ function minimax(seq, depth, alpha, beta, isMaximizing, ply = 0) {
 
 const SKILL_MAP = { 0: 0, 1: 1, 2: 3, 3: 5, 4: 7, 5: 9, 6: 11, 7: 13 };
 
-// FIX: isBotP1 must reflect the bot's actual seat, not be hardcoded to false by the caller.
-// See server.js triggerBotMove() — it now reads activeRoom.botIsP1 instead of passing `false`.
+// isBotP1 must reflect the bot's actual seat (P1 maximizes, P2 minimizes).
+// server.js triggerBotMove() should pass activeRoom.botIsP1.
 function getBotMove(sequence, skillLevel, isBotP1) {
   const depth = SKILL_MAP[skillLevel] ?? 3;
   if (depth === 0) {
     return SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
   }
-  const result = minimax(sequence, depth, -Infinity, Infinity, isBotP1, 0);
+  const result = minimax(sequence, depth, -Infinity, Infinity, isBotP1);
   return result.move || SYMBOLS[0];
 }
 
@@ -175,7 +205,10 @@ module.exports = {
   isValidSymbol,
   applyMove,
   getBotMove,
+  getOutcome,
   hasFiveWindowRepeat,
   hasThreeWindowFourTimes,
-  SYMBOLS
+  evaluateSequence,
+  SYMBOLS,
+  MAX_PLIES
 };
